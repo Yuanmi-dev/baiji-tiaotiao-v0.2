@@ -61,6 +61,7 @@ const CFG = {
   CAM_LOOK: 48,         // 鏡頭向跑向預視
   CAM_FOLLOW: 8,        // 鏡頭追及速率（指數平滑）
   LAND_SQUASH: 0.18,
+  COUNTDOWN_S: 3,      // 開始與重開前的倒數秒數（會顯示 3、2、1）
   // 平台
   PLAT_THICK: 24,
   PLAT_Y_MIN: 360,
@@ -125,6 +126,8 @@ let lastScoredId, nextPlatId, lastJump;
 let pendingRestart, tick, lastGroundTick, lastPressTick;
 let bufferedJump, bufferedCharge, squashT;
 let trauma, shakePhase, shakeX, shakeY;
+let countN, countT, countElapsed, lastCountdownS;
+let ignoreHoldUntilRelease, hapticLog;
 let lastTs = 0, acc = 0;
 best = +localStorage.getItem(BEST_KEY) || 0;
 
@@ -158,11 +161,13 @@ function updateShake(realDt) {
   if (trauma === 0) { shakeX = 0; shakeY = 0; }
 }
 function haptic(kind) {
+  hapticLog = hapticLog || [];
+  hapticLog.push({ kind, vibrateOn, hardware: VIBRATE_HARDWARE });
   if (!vibrateOn) return;
   if (VIBRATE_HARDWARE) {
-    const patterns = { full: [18], jump: [12], score: [8], hit: [30, 40, 30] };
+    const patterns = { full: [18], jump: [12], score: [8], hit: [30, 40, 30], count: [12] };
     try { navigator.vibrate(patterns[kind] || 10); } catch (e) {}
-  } else {
+  } else if (kind !== 'count') {
     const amounts = { full: 0.18, jump: 0.14, score: 0.10, hit: 0.85 };
     addTrauma(amounts[kind] || 0.12);
   }
@@ -201,8 +206,47 @@ function reset() {
   shakeX = 0;
   shakeY = 0;
   acc = 0;
+  countN = 0;
+  countT = 0;
+  countElapsed = 0;
+  lastCountdownS = 0;
+  ignoreHoldUntilRelease = false;
+  hapticLog = [];
   st = 'ready';
   ensurePlats();
+}
+
+function startCountdown() {
+  charging = false;
+  charge = 0;
+  chargedFull = false;
+  bufferedJump = false;
+  lastPressTick = NEVER;
+  ignoreHoldUntilRelease = isHeld();
+  const secs = Math.max(0, Math.round(CFG.COUNTDOWN_S));
+  if (secs <= 0) {
+    st = 'play';
+    lastCountdownS = 0;
+    return;
+  }
+  st = 'countdown';
+  countN = secs;
+  countT = 0;
+  countElapsed = 0;
+  lastCountdownS = 0;
+  haptic('count');
+}
+
+function finishCountdown() {
+  lastCountdownS = countElapsed;
+  countN = 0;
+  countT = 0;
+  st = 'play';
+  charging = false;
+  charge = 0;
+  bufferedJump = false;
+  lastPressTick = NEVER;
+  if (isHeld()) ignoreHoldUntilRelease = true;
 }
 
 function pickKind(progress) {
@@ -265,7 +309,15 @@ function startPress() {
     if (tOver > 0.28) pendingRestart = true;
     return;
   }
-  if (st === 'ready') st = 'play';
+  if (st === 'countdown') {
+    ignoreHoldUntilRelease = true;
+    return;
+  }
+  if (st === 'ready') {
+    startCountdown();
+    return;
+  }
+  if (ignoreHoldUntilRelease) return;
   if (st !== 'play' || charging) return;
   lastPressTick = tick;
   if (canStartCharge()) {
@@ -282,6 +334,15 @@ function endPress() {
   if (pendingRestart) {
     pendingRestart = false;
     reset();
+    startCountdown();
+    return;
+  }
+  if (st === 'countdown') {
+    ignoreHoldUntilRelease = false;
+    return;
+  }
+  if (ignoreHoldUntilRelease) {
+    ignoreHoldUntilRelease = false;
     return;
   }
   if (st === 'play' && charging) releaseJump();
@@ -359,6 +420,19 @@ function die() {
 
 function step(dt) {
   if (st === 'over') { tOver += dt; return; }
+  if (st === 'countdown') {
+    countT += dt;
+    countElapsed += dt;
+    const secs = Math.max(0, Math.round(CFG.COUNTDOWN_S));
+    if (countT >= 1) {
+      countT -= 1;
+      countN -= 1;
+      if (countN <= 0) finishCountdown();
+      else haptic('count');
+    }
+    if (st === 'countdown' && countElapsed >= secs) finishCountdown();
+    return;
+  }
   if (st !== 'play') return;
   tick += 1;
   if (squashT > 0) squashT = Math.max(0, squashT - dt);
@@ -521,7 +595,8 @@ function drawChicken() {
 }
 
 function drawChargeBar() {
-  if (!(charging || (st === 'play' && grounded))) return;
+  if (st !== 'play') return;
+  if (!(charging || grounded)) return;
   if (!charging && charge <= 0) return;
   const bw = 64, bh = 8;
   const sx = chick.x - bw / 2;
@@ -664,6 +739,25 @@ function draw() {
     ctx.fillStyle = '#5a6a75';
     ctx.fillText('點擊／空白鍵開始', W / 2, H * 0.58 + 132);
   }
+  if (st === 'countdown') {
+    const s = 1 + 0.45 * Math.exp(-8 * countT);
+    ctx.save();
+    ctx.translate(W / 2, H * 0.36);
+    ctx.scale(s, s);
+    ctx.fillStyle = 'rgba(255,255,255,.88)';
+    roundRect(-78, -110, 156, 168, 24);
+    ctx.fill();
+    ctx.fillStyle = '#1d2a33';
+    ctx.font = 'bold 140px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(countN), 0, -4);
+    ctx.restore();
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = 'rgba(20,40,50,.7)';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('即將開始', W / 2, H * 0.36 + 110);
+  }
   if (st === 'over') {
     ctx.fillStyle = 'rgba(20,30,40,.45)';
     ctx.fillRect(0, 0, W, H);
@@ -776,14 +870,23 @@ window.__BAIJI__ = {
       onPlatId, lastScoredId,
       taipeiLabel: taipeiDateLabel(SEED0),
       tick, coyoteLeft: Math.max(0, COYOTE_TICKS - (tick - lastGroundTick)),
-      trauma
+      trauma,
+      countN, countT, countElapsed, lastCountdownS,
+      ignoreHoldUntilRelease,
+      hapticLog: (hapticLog || []).map(e => Object.assign({}, e))
     };
   },
-  start() { if (st === 'ready') st = 'play'; return st; },
+  start() {
+    if (st === 'ready') startCountdown();
+    return st;
+  },
+  skipCountdown() {
+    if (st === 'ready' || st === 'countdown') finishCountdown();
+    return st;
+  },
   press: startPress,
   release: endPress,
   jumpWithCharge(t) {
-    if (st === 'ready') st = 'play';
     if (st !== 'play' || !grounded) return false;
     charging = true;
     charge = Math.max(0, Math.min(1, t));
