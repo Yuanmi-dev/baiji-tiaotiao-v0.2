@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
+<title>白雞跳跳 v0.2</title>
+<style>
+  html,body{
+    margin:0;height:100%;background:#6eb6dc;overflow:hidden;
+    font-family:"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+    touch-action:none;user-select:none;-webkit-user-select:none;
+    -webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;
+    overscroll-behavior:none;position:fixed;inset:0;
+  }
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#6eb6dc;}
+  canvas{display:block;max-width:100%;max-height:100%;width:auto;height:auto;touch-action:none;background:#bfe9ff;}
+  #vibBtn{
+    position:fixed;top:calc(12px + env(safe-area-inset-top,0px));right:12px;z-index:5;
+    border:0;border-radius:16px;padding:8px 12px;font-size:13px;line-height:1.2;
+    background:rgba(255,255,255,.88);color:#1d2a33;box-shadow:0 1px 4px rgba(0,0,0,.15);
+    font-family:inherit;touch-action:manipulation;-webkit-user-select:none;user-select:none;
+  }
+  #vibBtn[aria-pressed="false"]{background:rgba(0,0,0,.35);color:#fff;}
+  #hint{
+    position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));
+    text-align:center;font-size:11px;color:rgba(20,40,50,.7);pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="390" height="844"></canvas></div>
+<button type="button" id="vibBtn" aria-pressed="true">震動 開</button>
+<div id="hint"></div>
+<script>
+/* ============================================================
+   白雞跳跳 v0.2  — 難度與手感參數（調這裡即可）
+   ------------------------------------------------------------
+   關卡為什麼從「穿管子」改成「平台跳躍」：
+   v0.1 是持續下落、連點拍翅穿過管子。蓄力必須在落地後按住再放開，
+   空中長按只會一直掉下去，長短蓄力也對不到「要過哪一個缺口」。
+   改成自動向前的平台關後，短按過近台、長按過遠台或高跳，蓄力才有意義。
+   ============================================================ */
+const CFG = {
+  W: 390,
+  H: 844,
+  // 物理（單位：像素、秒）
+  GRAVITY: 2200,
+  JUMP_VY_MIN: 640,     // 輕點的最小起跳速度（向上）
+  JUMP_VY_MAX: 1200,    // 蓄滿的最大起跳速度
+  CHARGE_MS: 750,       // 蓄滿所需時間
+  RUN_SPEED: 230,       // 落地後與空中的水平速度；蓄力時會煞停
+  CHICKEN_R: 18,
+  // 平台
+  PLAT_THICK: 24,
+  PLAT_Y_MIN: 360,
+  PLAT_Y_MAX: 640,
+  START_W: 250,
+  START_Y: 580,
+  DEATH_Y: 920,
+  LOOKAHEAD: 8,
+  // 間距：與同高跳躍距離對齊（短跳約 134px，滿蓄約 251px）
+  GAP_SHORT: [88, 115],
+  GAP_MID:   [140, 175],
+  GAP_LONG:  [195, 228],
+  WIDTH_SAFE:   [130, 190],
+  WIDTH_NARROW: [74, 98],
+  STEP_UP:   [36, 70],
+  STEP_DOWN: [40, 90],
+  // 畫面
+  CAM_X: 110,
+  SHAKE_HIT: 10
+};
+
+// ---- 每日種子：台北時間（Asia/Taipei）的年月日 ----
+function taipeiSeed() {
+  const iso = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+  return Number(iso.replace(/-/g, ''));
+}
+function taipeiDateLabel(seed) {
+  const s = String(seed);
+  return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+}
+
+const SEED0 = taipeiSeed();
+const BEST_KEY = 'baijiBest.v02.' + SEED0;
+const VIB_KEY = 'baijiVibrate.v02';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const vibBtn = document.getElementById('vibBtn');
+const hintEl = document.getElementById('hint');
+
+const UA = navigator.userAgent || '';
+const VIBRATE_HARDWARE = typeof navigator.vibrate === 'function' && !/iP(hone|ad|od)/.test(UA);
+
+let vibrateOn = localStorage.getItem(VIB_KEY) !== '0';
+let rngState = 0;
+function rnd() {
+  rngState = (rngState * 1664525 + 1013904223) % 4294967296;
+  return rngState / 4294967296;
+}
+function randRange(a, b) { return a + rnd() * (b - a); }
+function randInt(a, b) { return Math.floor(randRange(a, b + 1)); }
+
+let st, chick, plats, score, best, tOver, camX;
+let charging, charge, chargedFull, grounded, onPlatId;
+let lastScoredId, nextPlatId, lastJump;
+let shakeT, shakeAmp, pendingRestart;
+let lastTs = 0;
+best = +localStorage.getItem(BEST_KEY) || 0;
+
+function syncVibUi() {
+  vibBtn.setAttribute('aria-pressed', vibrateOn ? 'true' : 'false');
+  vibBtn.textContent = vibrateOn ? '震動 開' : '震動 關';
+  hintEl.textContent = VIBRATE_HARDWARE
+    ? '支援裝置震動（無法調整強弱，僅能開關）'
+    : '此裝置不支援震動（例如 iPhone），已改用畫面抖動';
+}
+function setVibrate(on) {
+  vibrateOn = !!on;
+  localStorage.setItem(VIB_KEY, vibrateOn ? '1' : '0');
+  syncVibUi();
+}
+function startShake(amp, dur) {
+  shakeAmp = Math.max(shakeAmp || 0, amp);
+  shakeT = Math.max(shakeT || 0, dur);
+}
+function haptic(kind) {
+  if (!vibrateOn) return;
+  if (VIBRATE_HARDWARE) {
+    const patterns = { full: [18], jump: [12], score: [8], hit: [30, 40, 30] };
+    try { navigator.vibrate(patterns[kind] || 10); } catch (e) {}
+  } else {
+    const amps = { full: 4, jump: 3, score: 2, hit: CFG.SHAKE_HIT };
+    const durs = { full: 0.12, jump: 0.1, score: 0.08, hit: 0.35 };
+    startShake(amps[kind] || 3, durs[kind] || 0.1);
+  }
+}
+
+function reset() {
+  rngState = SEED0;
+  chick = { x: 80, y: CFG.START_Y - CFG.CHICKEN_R, vy: 0 };
+  plats = [];
+  nextPlatId = 1;
+  plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: CFG.START_W });
+  score = 0;
+  tOver = 0;
+  camX = 0;
+  charging = false;
+  charge = 0;
+  chargedFull = false;
+  grounded = true;
+  onPlatId = 1;
+  lastScoredId = 1;
+  lastJump = { vy: 0, charge: 0, peak: 0, airborne: false, startY: 0 };
+  shakeT = 0;
+  shakeAmp = 0;
+  pendingRestart = false;
+  st = 'ready';
+  ensurePlats();
+}
+
+function pickKind(progress) {
+  // 越後面越常出現長距、落差與窄台
+  const p = Math.min(1, progress / 18);
+  const r = rnd();
+  if (r < 0.42 - p * 0.18) return 'short';
+  if (r < 0.78 - p * 0.12) return 'mid';
+  if (r < 0.92) return 'long';
+  return 'up';
+}
+
+function ensurePlats() {
+  while (plats.length && plats[0].x + plats[0].w < camX - 80) plats.shift();
+  while (plats.length < CFG.LOOKAHEAD) {
+    const prev = plats[plats.length - 1];
+    const late = prev.id > 8;
+    let gap, w, y, kind;
+    // 前兩個缺口固定好過，並讓開場就看得到第一個缺口
+    if (prev.id === 1) {
+      kind = 'short';
+      gap = randRange(CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
+      w = randRange(220, 260);
+      y = prev.y + randRange(-8, 8);
+    } else if (prev.id === 2) {
+      kind = 'mid';
+      gap = randRange(CFG.GAP_MID[0], CFG.GAP_MID[1] - 8);
+      w = randRange(150, 190);
+      y = prev.y + randRange(-16, 10);
+    } else {
+    kind = pickKind(prev.id - 1);
+    if (kind === 'short') {
+      gap = randRange(CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
+      w = late && rnd() < 0.45
+        ? randRange(CFG.WIDTH_NARROW[0], CFG.WIDTH_NARROW[1])
+        : randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+      y = prev.y + randRange(-12, 12);
+    } else if (kind === 'mid') {
+      gap = randRange(CFG.GAP_MID[0], CFG.GAP_MID[1]);
+      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+      y = prev.y + (rnd() < 0.5 ? randRange(-20, 20) : 0);
+    } else if (kind === 'long') {
+      gap = randRange(CFG.GAP_LONG[0], CFG.GAP_LONG[1]);
+      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1] + 20);
+      y = prev.y + randRange(0, CFG.STEP_DOWN[1] * 0.4);
+    } else {
+      gap = randRange(CFG.GAP_MID[0] - 16, CFG.GAP_MID[1] - 10);
+      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+      y = prev.y - randRange(CFG.STEP_UP[0], CFG.STEP_UP[1]);
+    }
+    y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
+    } // end else (id>2)
+    y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
+    plats.push({ id: nextPlatId++, x: prev.x + prev.w + gap, y, w, kind });
+  }
+}
+
+function startPress() {
+  if (st === 'over') {
+    if (tOver > 0.28) pendingRestart = true;
+    return;
+  }
+  if (st === 'ready') st = 'play';
+  if (st === 'play' && grounded && !charging) {
+    charging = true;
+    charge = 0;
+    chargedFull = false;
+  }
+}
+function endPress() {
+  if (pendingRestart) {
+    pendingRestart = false;
+    reset();
+    return;
+  }
+  if (st === 'play' && charging) releaseJump();
+}
+function releaseJump() {
+  if (!charging) return;
+  const t = Math.max(0, Math.min(1, charge));
+  const vy = CFG.JUMP_VY_MIN + t * (CFG.JUMP_VY_MAX - CFG.JUMP_VY_MIN);
+  charging = false;
+  charge = 0;
+  chargedFull = false;
+  grounded = false;
+  onPlatId = 0;
+  chick.vy = -vy;
+  lastJump = { vy: vy, charge: t, peak: 0, airborne: true, startY: chick.y };
+  haptic('jump');
+}
+
+function findPlatUnder(px, feetY, slop) {
+  for (let i = 0; i < plats.length; i++) {
+    const p = plats[i];
+    if (px + 8 >= p.x && px - 8 <= p.x + p.w && feetY >= p.y - slop && feetY <= p.y + 18) return p;
+  }
+  return null;
+}
+
+function landOn(p) {
+  chick.y = p.y - CFG.CHICKEN_R;
+  chick.vy = 0;
+  grounded = true;
+  charging = false;
+  charge = 0;
+  if (lastJump.airborne) {
+    lastJump.peak = Math.max(lastJump.peak, lastJump.startY - chick.y);
+    lastJump.airborne = false;
+  }
+  if (p.id !== onPlatId && p.id > lastScoredId) {
+    score += 1;
+    lastScoredId = p.id;
+    haptic('score');
+  }
+  onPlatId = p.id;
+}
+
+function die() {
+  if (st === 'over') return;
+  charging = false;
+  charge = 0;
+  st = 'over';
+  tOver = 0;
+  haptic('hit');
+  if (score > best) {
+    best = score;
+    localStorage.setItem(BEST_KEY, String(best));
+  }
+}
+
+function step(dt) {
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt);
+  if (st === 'over') { tOver += dt; return; }
+  if (st !== 'play') return;
+
+  if (charging) {
+    charge = Math.min(1, charge + dt * 1000 / CFG.CHARGE_MS);
+    if (charge >= 1 && !chargedFull) {
+      chargedFull = true;
+      haptic('full');
+    }
+  }
+
+  // 蓄力時仍向前跑；若跑到平台邊緣且正在蓄力，就以當前力道自動起跳
+  const vx = CFG.RUN_SPEED;
+  const prevY = chick.y;
+  let newX = chick.x + vx * dt;
+  if (grounded && onPlatId) {
+    const cur = plats.find(p => p.id === onPlatId);
+    if (cur && newX + 8 > cur.x + cur.w) {
+      if (charging) {
+        chick.x = cur.x + cur.w - 8;
+        releaseJump();
+        newX = chick.x;
+      }
+    }
+  }
+  chick.x = newX;
+
+  if (!grounded) {
+    chick.vy += CFG.GRAVITY * dt;
+    const newY = chick.y + chick.vy * dt;
+    if (lastJump.airborne) {
+      lastJump.peak = Math.max(lastJump.peak, lastJump.startY - Math.min(newY, chick.y));
+    }
+    let landed = null;
+    if (chick.vy >= 0) {
+      const feet0 = prevY + CFG.CHICKEN_R;
+      const feet1 = newY + CFG.CHICKEN_R;
+      for (let i = 0; i < plats.length; i++) {
+        const p = plats[i];
+        if (chick.x + 8 >= p.x && chick.x - 8 <= p.x + p.w && feet0 <= p.y + 4 && feet1 >= p.y) {
+          landed = p;
+          break;
+        }
+      }
+    }
+    if (landed) landOn(landed);
+    else chick.y = newY;
+  } else {
+    const p = findPlatUnder(chick.x, chick.y + CFG.CHICKEN_R, 8);
+    if (!p) {
+      grounded = false;
+      onPlatId = 0;
+      chick.vy = 0;
+    } else {
+      chick.y = p.y - CFG.CHICKEN_R;
+      onPlatId = p.id;
+    }
+  }
+
+  if (chick.y - CFG.CHICKEN_R > CFG.DEATH_Y || chick.y > CFG.DEATH_Y) die();
+
+  camX = Math.max(0, chick.x - CFG.CAM_X);
+  ensurePlats();
+}
+
+function roundRect(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function drawCloud(x, y, s) {
+  ctx.fillStyle = 'rgba(255,255,255,.88)';
+  ctx.beginPath();
+  ctx.arc(x, y, 16 * s, 0, Math.PI * 2);
+  ctx.arc(x + 18 * s, y - 8 * s, 14 * s, 0, Math.PI * 2);
+  ctx.arc(x + 34 * s, y, 18 * s, 0, Math.PI * 2);
+  ctx.arc(x + 16 * s, y + 6 * s, 14 * s, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawChicken() {
+  const r = CFG.CHICKEN_R;
+  const squat = charging ? 0.28 * charge : 0;
+  ctx.save();
+  ctx.translate(chick.x, chick.y + r * squat * 1.15);
+  const tilt = grounded ? 0 : Math.max(-0.45, Math.min(0.7, chick.vy / 900));
+  ctx.rotate(tilt);
+  ctx.scale(1 + squat * 0.12, 1 - squat);
+  // 身體
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // 冠
+  ctx.fillStyle = '#e33';
+  ctx.beginPath();
+  ctx.arc(-2, -r + 1, 5.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(5, -r + 4, 3.6, 0, Math.PI * 2);
+  ctx.fill();
+  // 喙
+  ctx.fillStyle = '#f90';
+  ctx.beginPath();
+  ctx.moveTo(r - 3, -2);
+  ctx.lineTo(r + 11, 2);
+  ctx.lineTo(r - 3, 6);
+  ctx.closePath();
+  ctx.fill();
+  // 眼
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(6, -4, 2.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(6.7, -4.6, 0.7, 0, Math.PI * 2);
+  ctx.fill();
+  // 翅膀
+  ctx.fillStyle = '#f3f3f3';
+  ctx.strokeStyle = '#c8c8c8';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(-6, 4, 8, 6, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  // 腳（不受蹲下壓縮，才看起來是蹲）
+  if (grounded) {
+    ctx.strokeStyle = '#e09a2a';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    const footY = chick.y + r - 1;
+    const bend = charging ? 4 * charge : 0;
+    ctx.beginPath();
+    ctx.moveTo(chick.x - 6, chick.y + 8);
+    ctx.lineTo(chick.x - 8, footY - bend);
+    ctx.lineTo(chick.x - 2, footY);
+    ctx.moveTo(chick.x + 5, chick.y + 8);
+    ctx.lineTo(chick.x + 4, footY - bend);
+    ctx.lineTo(chick.x + 10, footY);
+    ctx.stroke();
+  }
+}
+
+function drawChargeBar() {
+  if (!(charging || (st === 'play' && grounded))) return;
+  if (!charging && charge <= 0) return;
+  const bw = 64, bh = 8;
+  const sx = chick.x - bw / 2;
+  const sy = chick.y - CFG.CHICKEN_R - 22;
+  ctx.save();
+  roundRect(sx - 1, sy - 1, bw + 2, bh + 2, 5);
+  ctx.fillStyle = 'rgba(20,30,40,.45)';
+  ctx.fill();
+  roundRect(sx, sy, bw, bh, 4);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  const t = charge;
+  if (t > 0) {
+    ctx.save();
+    ctx.beginPath();
+    roundRect(sx, sy, bw, bh, 4);
+    ctx.clip();
+    ctx.fillStyle = t >= 1 ? '#ff4d3a' : (t > 0.66 ? '#ff8a1f' : '#ffd24a');
+    ctx.fillRect(sx, sy, bw * t, bh);
+    ctx.restore();
+  }
+  if (t >= 1) {
+    ctx.fillStyle = '#ff4d3a';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('滿', chick.x, sy - 4);
+  }
+  ctx.restore();
+}
+
+function draw() {
+  const W = CFG.W, H = CFG.H;
+  ctx.save();
+  if (shakeT > 0 && shakeAmp > 0) {
+    const k = Math.min(1, shakeT / 0.08);
+    ctx.translate((Math.random() - 0.5) * 2 * shakeAmp * k, (Math.random() - 0.5) * 2 * shakeAmp * k);
+  }
+  // 天空
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#9ad8f5');
+  sky.addColorStop(0.55, '#bfe9ff');
+  sky.addColorStop(1, '#d9f3c9');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  // 太陽
+  ctx.fillStyle = '#ffe27a';
+  ctx.beginPath();
+  ctx.arc(W - 58, 128, 28, 0, Math.PI * 2);
+  ctx.fill();
+  // 遠山（停在中段，不要把谷底蓋住）
+  ctx.fillStyle = '#8ec56e';
+  ctx.beginPath();
+  ctx.moveTo(0, 520);
+  ctx.lineTo(80, 430);
+  ctx.lineTo(160, 500);
+  ctx.lineTo(250, 400);
+  ctx.lineTo(340, 490);
+  ctx.lineTo(390, 450);
+  ctx.lineTo(390, 620);
+  ctx.lineTo(0, 620);
+  ctx.fill();
+  ctx.fillStyle = '#7bb85c';
+  ctx.beginPath();
+  ctx.moveTo(0, 580);
+  ctx.lineTo(120, 500);
+  ctx.lineTo(220, 570);
+  ctx.lineTo(310, 490);
+  ctx.lineTo(390, 560);
+  ctx.lineTo(390, 640);
+  ctx.lineTo(0, 640);
+  ctx.fill();
+  // 可見深谷：缺口下方看得到墜落區
+  const abyss = ctx.createLinearGradient(0, 660, 0, H);
+  abyss.addColorStop(0, '#c5e094');
+  abyss.addColorStop(0.12, '#9a7a4a');
+  abyss.addColorStop(0.45, '#5c3d22');
+  abyss.addColorStop(1, '#2a160c');
+  ctx.fillStyle = abyss;
+  ctx.fillRect(0, 660, W, H - 660);
+
+  // 雲（視差）
+  const cx = camX;
+  for (let i = 0; i < 6; i++) {
+    const base = i * 220;
+    const wx = ((base - cx * 0.28) % 1320 + 1320) % 1320 - 80;
+    drawCloud(wx, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
+  }
+
+  ctx.save();
+  ctx.translate(-cx, 0);
+
+  for (const p of plats) {
+    // 影子
+    ctx.fillStyle = 'rgba(40,70,30,.22)';
+    ctx.fillRect(p.x + 4, p.y + CFG.PLAT_THICK, p.w - 4, 8);
+    // 土
+    ctx.fillStyle = '#8b5a2b';
+    roundRect(p.x, p.y, p.w, CFG.PLAT_THICK + 10, 6);
+    ctx.fill();
+    // 草皮
+    ctx.fillStyle = '#7cc35b';
+    roundRect(p.x, p.y, p.w, 12, 6);
+    ctx.fill();
+    ctx.fillRect(p.x, p.y + 6, p.w, 8);
+    // 草尖
+    ctx.strokeStyle = '#67b049';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let gx = p.x + 6; gx < p.x + p.w - 4; gx += 8) {
+      ctx.moveTo(gx, p.y + 3);
+      ctx.lineTo(gx + 2, p.y - 4);
+    }
+    ctx.stroke();
+  }
+
+  drawChicken();
+  drawChargeBar();
+  ctx.restore();
+
+  // HUD
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(20,40,50,.82)';
+  ctx.font = 'bold 56px sans-serif';
+  ctx.fillText(String(score), W / 2, 86);
+  ctx.font = '13px sans-serif';
+  ctx.fillStyle = 'rgba(20,40,50,.72)';
+  ctx.fillText('今日最佳 ' + best + '　台北 ' + taipeiDateLabel(SEED0), W / 2, 112);
+  ctx.font = '12px sans-serif';
+  ctx.fillText('白雞跳跳 v0.2', W / 2, 132);
+
+  if (st === 'ready') {
+    ctx.fillStyle = 'rgba(255,255,255,.86)';
+    roundRect(36, H * 0.58, W - 72, 150, 16);
+    ctx.fill();
+    ctx.fillStyle = '#1d2a33';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText('按住蓄力，放開起跳', W / 2, H * 0.58 + 48);
+    ctx.font = '15px sans-serif';
+    ctx.fillStyle = '#3a4a55';
+    ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, H * 0.58 + 80);
+    ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, H * 0.58 + 104);
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#5a6a75';
+    ctx.fillText('點擊／空白鍵開始', W / 2, H * 0.58 + 132);
+  }
+  if (st === 'over') {
+    ctx.fillStyle = 'rgba(20,30,40,.45)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,.94)';
+    roundRect(28, H * 0.38, W - 56, 168, 18);
+    ctx.fill();
+    ctx.fillStyle = '#1d2a33';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText('白雞不是雞，也不會飛', W / 2, H * 0.38 + 50);
+    ctx.font = '18px sans-serif';
+    ctx.fillStyle = '#3a4a55';
+    ctx.fillText('本局 ' + score + '　今日最佳 ' + best, W / 2, H * 0.38 + 88);
+    ctx.font = '15px sans-serif';
+    ctx.fillText('再點一下重來', W / 2, H * 0.38 + 124);
+  }
+  ctx.restore();
+}
+
+function loop(ts) {
+  const dt = Math.min(0.05, ((ts - lastTs) / 1000) || 0);
+  lastTs = ts;
+  step(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ---- 輸入：觸控與滑鼠，並關掉長按選單／選取／雙指放大 ----
+let pointerId = null;
+let keyHeld = false;
+function onPointerDown(ev) {
+  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn')) return;
+  ev.preventDefault();
+  if (pointerId !== null) return;
+  pointerId = ev.pointerId;
+  startPress();
+}
+function onPointerUp(ev) {
+  if (pointerId === null || ev.pointerId !== pointerId) return;
+  pointerId = null;
+  ev.preventDefault();
+  endPress();
+}
+window.addEventListener('pointerdown', onPointerDown, { passive: false });
+window.addEventListener('pointerup', onPointerUp, { passive: false });
+window.addEventListener('pointercancel', onPointerUp, { passive: false });
+window.addEventListener('keydown', ev => {
+  if (ev.code !== 'Space' && ev.code !== 'ArrowUp') return;
+  ev.preventDefault();
+  if (ev.repeat || keyHeld) return;
+  keyHeld = true;
+  startPress();
+});
+window.addEventListener('keyup', ev => {
+  if (ev.code !== 'Space' && ev.code !== 'ArrowUp') return;
+  ev.preventDefault();
+  if (!keyHeld) return;
+  keyHeld = false;
+  endPress();
+});
+window.addEventListener('contextmenu', ev => ev.preventDefault());
+window.addEventListener('gesturestart', ev => ev.preventDefault());
+window.addEventListener('touchstart', ev => {
+  if (ev.touches && ev.touches.length > 1) ev.preventDefault();
+}, { passive: false });
+document.addEventListener('selectstart', ev => ev.preventDefault());
+
+vibBtn.addEventListener('click', ev => {
+  ev.preventDefault();
+  ev.stopPropagation();
+  setVibrate(!vibrateOn);
+});
+vibBtn.addEventListener('pointerdown', ev => ev.stopPropagation());
+
+// 供 headless 驗證使用
+window.__BAIJI__ = {
+  CFG,
+  SEED0,
+  get() {
+    return {
+      st, score, best, seed: SEED0,
+      x: chick.x, y: chick.y, vy: chick.vy,
+      grounded, charging, charge,
+      vibrateOn, vibrateSupported: VIBRATE_HARDWARE,
+      lastJump: Object.assign({}, lastJump),
+      platCount: plats.length,
+      onPlatId, lastScoredId,
+      taipeiLabel: taipeiDateLabel(SEED0)
+    };
+  },
+  start() { if (st === 'ready') st = 'play'; return st; },
+  press: startPress,
+  release: endPress,
+  jumpWithCharge(t) {
+    if (st === 'ready') st = 'play';
+    if (st !== 'play' || !grounded) return false;
+    charging = true;
+    charge = Math.max(0, Math.min(1, t));
+    chargedFull = charge >= 1;
+    releaseJump();
+    return true;
+  },
+  plats() { return plats.map(p => ({ id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || 'start' })); },
+  reset,
+  die,
+  setVibrate
+};
+
+syncVibUi();
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
