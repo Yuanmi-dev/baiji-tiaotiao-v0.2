@@ -45,13 +45,22 @@
 const CFG = {
   W: 390,
   H: 844,
-  // 物理（單位：像素、秒）
-  GRAVITY: 2200,
+  // 物理（單位：像素、秒）。模擬用固定 60 tick，避免幀率影響跳高。
+  TICK: 1 / 60,
+  GRAVITY: 2200,        // 上升重力
+  FALL_GRAVITY_MUL: 1.8, // 下落重力倍數（較不漂）
+  MAX_FALL: 1400,       // 下落速度上限
   JUMP_VY_MIN: 640,     // 輕點的最小起跳速度（向上）
   JUMP_VY_MAX: 1200,    // 蓄滿的最大起跳速度
   CHARGE_MS: 750,       // 蓄滿所需時間
-  RUN_SPEED: 230,       // 落地後與空中的水平速度；蓄力時會煞停
+  RUN_SPEED: 230,       // 水平速度；蓄力時仍會向前跑
   CHICKEN_R: 18,
+  COYOTE_S: 0.10,       // 走下平台後仍可起跳的寬限
+  JUMP_BUFFER_S: 0.12,  // 落地前短按，落地後仍起跳
+  SHAKE_DECAY: 1.2,
+  CAM_LOOK: 48,         // 鏡頭向跑向預視
+  CAM_FOLLOW: 8,        // 鏡頭追及速率（指數平滑）
+  LAND_SQUASH: 0.18,
   // 平台
   PLAT_THICK: 24,
   PLAT_Y_MIN: 360,
@@ -60,17 +69,16 @@ const CFG = {
   START_Y: 580,
   DEATH_Y: 920,
   LOOKAHEAD: 8,
-  // 間距：與同高跳躍距離對齊（短跳約 134px，滿蓄約 251px）
-  GAP_SHORT: [88, 115],
-  GAP_MID:   [140, 175],
-  GAP_LONG:  [195, 228],
+  // 間距：與同高飛距對齊（下落重力 1.8 倍後，短跳約 104px，滿蓄約 195px）
+  GAP_SHORT: [70, 92],
+  GAP_MID:   [108, 138],
+  GAP_LONG:  [152, 182],
   WIDTH_SAFE:   [130, 190],
   WIDTH_NARROW: [74, 98],
   STEP_UP:   [36, 70],
   STEP_DOWN: [40, 90],
   // 畫面
-  CAM_X: 110,
-  SHAKE_HIT: 10
+  CAM_X: 110
 };
 
 // ---- 每日種子：台北時間（Asia/Taipei）的年月日 ----
@@ -89,6 +97,10 @@ function taipeiDateLabel(seed) {
 const SEED0 = taipeiSeed();
 const BEST_KEY = 'baijiBest.v02.' + SEED0;
 const VIB_KEY = 'baijiVibrate.v02';
+const DEBUG = /(?:\?|&)debug=1(?:&|$)/.test(location.search || '');
+const COYOTE_TICKS = Math.round(CFG.COYOTE_S / CFG.TICK);
+const BUFFER_TICKS = Math.round(CFG.JUMP_BUFFER_S / CFG.TICK);
+const NEVER = -1e9;
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -107,28 +119,43 @@ function rnd() {
 function randRange(a, b) { return a + rnd() * (b - a); }
 function randInt(a, b) { return Math.floor(randRange(a, b + 1)); }
 
-let st, chick, plats, score, best, tOver, camX;
+let st, chick, plats, score, best, tOver, camX, camLook;
 let charging, charge, chargedFull, grounded, onPlatId;
 let lastScoredId, nextPlatId, lastJump;
-let shakeT, shakeAmp, pendingRestart;
-let lastTs = 0;
+let pendingRestart, tick, lastGroundTick, lastPressTick;
+let bufferedJump, bufferedCharge, squashT;
+let trauma, shakePhase, shakeX, shakeY;
+let lastTs = 0, acc = 0;
 best = +localStorage.getItem(BEST_KEY) || 0;
 
 function syncVibUi() {
   vibBtn.setAttribute('aria-pressed', vibrateOn ? 'true' : 'false');
   vibBtn.textContent = vibrateOn ? '震動 開' : '震動 關';
   hintEl.textContent = VIBRATE_HARDWARE
-    ? '支援裝置震動（無法調整強弱，僅能開關）'
-    : '此裝置不支援震動（例如 iPhone），已改用畫面抖動';
+    ? '支援裝置震動（無法調整強弱，僅能開關；關閉時畫面也不抖）'
+    : '此裝置不支援震動（例如 iPhone），已改用畫面抖動；可一併關閉';
 }
 function setVibrate(on) {
   vibrateOn = !!on;
   localStorage.setItem(VIB_KEY, vibrateOn ? '1' : '0');
+  if (!vibrateOn) { trauma = 0; shakeX = 0; shakeY = 0; }
   syncVibUi();
 }
-function startShake(amp, dur) {
-  shakeAmp = Math.max(shakeAmp || 0, amp);
-  shakeT = Math.max(shakeT || 0, dur);
+function addTrauma(amount) {
+  trauma = Math.min(1, (trauma || 0) + amount);
+}
+function updateShake(realDt) {
+  if (!vibrateOn || trauma <= 0) {
+    if (!vibrateOn) trauma = 0;
+    if (trauma <= 0) { shakeX = 0; shakeY = 0; }
+    if (!vibrateOn || trauma <= 0) return;
+  }
+  trauma = Math.max(0, trauma - CFG.SHAKE_DECAY * realDt);
+  const s = trauma * trauma;
+  shakePhase += realDt * 30;
+  shakeX = 12 * s * Math.sin(shakePhase * 1.7);
+  shakeY = 8 * s * Math.sin(shakePhase * 2.3);
+  if (trauma === 0) { shakeX = 0; shakeY = 0; }
 }
 function haptic(kind) {
   if (!vibrateOn) return;
@@ -136,10 +163,13 @@ function haptic(kind) {
     const patterns = { full: [18], jump: [12], score: [8], hit: [30, 40, 30] };
     try { navigator.vibrate(patterns[kind] || 10); } catch (e) {}
   } else {
-    const amps = { full: 4, jump: 3, score: 2, hit: CFG.SHAKE_HIT };
-    const durs = { full: 0.12, jump: 0.1, score: 0.08, hit: 0.35 };
-    startShake(amps[kind] || 3, durs[kind] || 0.1);
+    const amounts = { full: 0.18, jump: 0.14, score: 0.10, hit: 0.85 };
+    addTrauma(amounts[kind] || 0.12);
   }
+}
+function isHeld() { return pointerId !== null || keyHeld; }
+function canStartCharge() {
+  return grounded || (tick - lastGroundTick <= COYOTE_TICKS);
 }
 
 function reset() {
@@ -151,6 +181,7 @@ function reset() {
   score = 0;
   tOver = 0;
   camX = 0;
+  camLook = 0;
   charging = false;
   charge = 0;
   chargedFull = false;
@@ -158,9 +189,18 @@ function reset() {
   onPlatId = 1;
   lastScoredId = 1;
   lastJump = { vy: 0, charge: 0, peak: 0, airborne: false, startY: 0 };
-  shakeT = 0;
-  shakeAmp = 0;
   pendingRestart = false;
+  tick = 0;
+  lastGroundTick = 0;
+  lastPressTick = NEVER;
+  bufferedJump = false;
+  bufferedCharge = 0;
+  squashT = 0;
+  trauma = 0;
+  shakePhase = 0;
+  shakeX = 0;
+  shakeY = 0;
+  acc = 0;
   st = 'ready';
   ensurePlats();
 }
@@ -226,10 +266,16 @@ function startPress() {
     return;
   }
   if (st === 'ready') st = 'play';
-  if (st === 'play' && grounded && !charging) {
+  if (st !== 'play' || charging) return;
+  lastPressTick = tick;
+  if (canStartCharge()) {
     charging = true;
     charge = 0;
     chargedFull = false;
+    bufferedJump = false;
+  } else {
+    bufferedJump = true;
+    bufferedCharge = 0;
   }
 }
 function endPress() {
@@ -249,6 +295,9 @@ function releaseJump() {
   chargedFull = false;
   grounded = false;
   onPlatId = 0;
+  lastGroundTick = NEVER;
+  lastPressTick = NEVER;
+  bufferedJump = false;
   chick.vy = -vy;
   lastJump = { vy: vy, charge: t, peak: 0, airborne: true, startY: chick.y };
   haptic('jump');
@@ -266,11 +315,11 @@ function landOn(p) {
   chick.y = p.y - CFG.CHICKEN_R;
   chick.vy = 0;
   grounded = true;
-  charging = false;
-  charge = 0;
+  lastGroundTick = tick;
   if (lastJump.airborne) {
     lastJump.peak = Math.max(lastJump.peak, lastJump.startY - chick.y);
     lastJump.airborne = false;
+    squashT = CFG.LAND_SQUASH;
   }
   if (p.id !== onPlatId && p.id > lastScoredId) {
     score += 1;
@@ -278,6 +327,21 @@ function landOn(p) {
     haptic('score');
   }
   onPlatId = p.id;
+  if (isHeld() && !charging) {
+    charging = true;
+    charge = 0;
+    chargedFull = false;
+    bufferedJump = false;
+  } else if (bufferedJump && tick - lastPressTick <= BUFFER_TICKS) {
+    charging = true;
+    charge = Math.max(0, Math.min(1, bufferedCharge));
+    bufferedJump = false;
+    releaseJump();
+  } else {
+    charging = false;
+    charge = 0;
+    bufferedJump = false;
+  }
 }
 
 function die() {
@@ -294,9 +358,11 @@ function die() {
 }
 
 function step(dt) {
-  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt);
   if (st === 'over') { tOver += dt; return; }
   if (st !== 'play') return;
+  tick += 1;
+  if (squashT > 0) squashT = Math.max(0, squashT - dt);
+  if (grounded && chick.vy >= 0) lastGroundTick = tick;
 
   if (charging) {
     charge = Math.min(1, charge + dt * 1000 / CFG.CHARGE_MS);
@@ -323,7 +389,8 @@ function step(dt) {
   chick.x = newX;
 
   if (!grounded) {
-    chick.vy += CFG.GRAVITY * dt;
+    const g = chick.vy > 0 ? CFG.GRAVITY * CFG.FALL_GRAVITY_MUL : CFG.GRAVITY;
+    chick.vy = Math.min(chick.vy + g * dt, CFG.MAX_FALL);
     const newY = chick.y + chick.vy * dt;
     if (lastJump.airborne) {
       lastJump.peak = Math.max(lastJump.peak, lastJump.startY - Math.min(newY, chick.y));
@@ -356,7 +423,10 @@ function step(dt) {
 
   if (chick.y - CFG.CHICKEN_R > CFG.DEATH_Y || chick.y > CFG.DEATH_Y) die();
 
-  camX = Math.max(0, chick.x - CFG.CAM_X);
+  const lookTarget = CFG.CAM_LOOK;
+  const followT = 1 - Math.exp(-CFG.CAM_FOLLOW * dt);
+  camLook += (lookTarget - camLook) * followT;
+  camX = Math.max(0, chick.x - CFG.CAM_X + camLook);
   ensurePlats();
 }
 
@@ -383,7 +453,8 @@ function drawCloud(x, y, s) {
 
 function drawChicken() {
   const r = CFG.CHICKEN_R;
-  const squat = charging ? 0.28 * charge : 0;
+  const landSq = squashT > 0 ? 0.22 * (squashT / CFG.LAND_SQUASH) : 0;
+  const squat = Math.max(charging ? 0.28 * charge : 0, landSq);
   ctx.save();
   ctx.translate(chick.x, chick.y + r * squat * 1.15);
   const tilt = grounded ? 0 : Math.max(-0.45, Math.min(0.7, chick.vy / 900));
@@ -484,10 +555,7 @@ function drawChargeBar() {
 function draw() {
   const W = CFG.W, H = CFG.H;
   ctx.save();
-  if (shakeT > 0 && shakeAmp > 0) {
-    const k = Math.min(1, shakeT / 0.08);
-    ctx.translate((Math.random() - 0.5) * 2 * shakeAmp * k, (Math.random() - 0.5) * 2 * shakeAmp * k);
-  }
+  if (shakeX || shakeY) ctx.translate(shakeX, shakeY);
   // 天空
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, '#9ad8f5');
@@ -611,13 +679,37 @@ function draw() {
     ctx.font = '15px sans-serif';
     ctx.fillText('再點一下重來', W / 2, H * 0.38 + 124);
   }
+  if (DEBUG) {
+    const next = plats.filter(p => p.id > (onPlatId || lastScoredId)).sort((a, b) => a.id - b.id)[0];
+    const cur = plats.find(p => p.id === onPlatId);
+    const gap = (cur && next) ? Math.round(next.x - (cur.x + cur.w)) : '-';
+    const lines = [
+      'debug 種子 ' + SEED0,
+      'charge ' + charge.toFixed(2) + '  vy ' + Math.round(chick.vy),
+      'peak ' + Math.round(lastJump.peak) + '  lastVy ' + Math.round(lastJump.vy),
+      'gap ' + gap + '  score ' + score,
+      'coyote ' + Math.max(0, COYOTE_TICKS - (tick - lastGroundTick))
+    ];
+    ctx.textAlign = 'left';
+    ctx.font = '11px monospace';
+    ctx.fillStyle = 'rgba(20,30,40,.72)';
+    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 10, H - 64 + i * 13);
+  }
   ctx.restore();
 }
 
 function loop(ts) {
-  const dt = Math.min(0.05, ((ts - lastTs) / 1000) || 0);
+  const frameDt = Math.min(0.05, ((ts - lastTs) / 1000) || 0);
   lastTs = ts;
-  step(dt);
+  acc += frameDt;
+  let n = 0;
+  while (acc >= CFG.TICK && n < 5) {
+    step(CFG.TICK);
+    acc -= CFG.TICK;
+    n++;
+  }
+  if (n >= 5) acc = 0;
+  updateShake(frameDt);
   draw();
   requestAnimationFrame(loop);
 }
@@ -682,7 +774,9 @@ window.__BAIJI__ = {
       lastJump: Object.assign({}, lastJump),
       platCount: plats.length,
       onPlatId, lastScoredId,
-      taipeiLabel: taipeiDateLabel(SEED0)
+      taipeiLabel: taipeiDateLabel(SEED0),
+      tick, coyoteLeft: Math.max(0, COYOTE_TICKS - (tick - lastGroundTick)),
+      trauma
     };
   },
   start() { if (st === 'ready') st = 'play'; return st; },

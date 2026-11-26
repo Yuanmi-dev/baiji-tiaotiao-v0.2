@@ -17,3 +17,18 @@
 - 遊戲可從開始玩到結束再重開：自動跑到台邊起跳並得分後進入結束畫面，用 pointer 事件重開，再開始新的一局。console 沒有 error。
 - 截圖：`/workspace/baiji-tiaotiao-v0.2-gameplay.png`（遊戲中，已得分、可見平台與缺口）。
 - 未做：真機觸控與震動尚未人工實測；手感參數尚未經人工調整。
+
+## 參考技能後的補強（同一日稍後）
+
+只把外部清單當參考，沒有執行裡面的安裝或腳本。實際採用並寫進程式的有：
+
+- `platformer`：土狼時間 0.10 秒、跳躍緩衝 0.12 秒、下落重力 1.8 倍、下落速度上限。蓄力跳高本身仍用「起跳前蓄力」模型，沒有再混用「放開剪跳」。
+- `physics-tuning`：固定 60 tick 模擬，單幀最多 5 步。
+- `game-feel`：trauma 平方配正弦波的鏡頭抖動（只畫位移，不改物理）；落地擠壓；開關可關閉抖動。沒有加 hit-stop，避免操作像延遲。
+- `camera-systems`：向跑向做指數平滑預視；抖動加在跟隨之後。
+- `prototype-fast`：`?debug=1` 除錯 HUD、檔案開頭的 CFG、BRIEF.md。
+- `game-ui-ux`：震動鈕與底部說明已避開 safe-area；沒有為此改引擎或重做整套 UI。
+- `input-systems`：觸控與鍵盤走同一套按住／放開；忽略鍵盤連發。沒有做按鍵重綁或手把。
+- 有讀但沒用上：`phaser-core`／`pixijs-rendering`（本專案維持 vanilla Canvas）、`itch-publish`（這次不上 itch，試玩已放 GitHub Pages）。
+
+headless 再驗一次：最小跳最高點約 88 px、蓄滿約 317 px；按住 80 ms 與 800 ms 高度不同；可開始、結束、重開；console 無錯誤。
