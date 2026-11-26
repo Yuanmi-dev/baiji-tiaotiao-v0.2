@@ -58,3 +58,16 @@ headless Chrome、viewport 390×844，每組 8 次（放開到位置開始上升
   - `jumpWithCharge(0)`：msToMove 最小 0.10、中位數 0.10、平均 0.14、最大 0.20
   - `jumpWithCharge(1)`：msToMove 最小 0.20、中位數 0.20、平均 0.22、最大 0.30
 - 跳高（修正前後皆同）：蓄力 0 為 87.83 px（vy 640）；蓄力 1 為 317.33 px（vy 1200）
+
+## 左右留白與底部說明被擋（2026-11-27）
+
+真機（iPhone Chrome）畫面以固定 390×844 比例置中，左右出現淺藍色留白，底部說明也被工具列擋住。
+
+做法：改以高度為基準（邏輯高仍為 844），用 `100dvh` 與 `visualViewport` 讓畫布填滿可見區域，並處理 safe-area。天空、山、地面、雲依寬度橫向延伸，不拉伸、不用色塊補邊。玩法公平採用「前方可視距離固定」：`CFG.VIEW_AHEAD` 為 280（與原設計 390-110 相同），多出來的寬度加在雞的後方；超過 `CFG.MAX_ASPECT`（2）的部分只延伸背景，不加看前方。平台生成仍只依每日種子，與螢幕寬度無關。底部說明改放進開始卡與結算卡。
+
+headless 截圖（console 無錯誤；四種尺寸左右皆無留白；四種寬度平台座標相同；前方可視距離約 280）：
+
+- `/workspace/baiji-v02-fill-390x844.png`
+- `/workspace/baiji-v02-fill-430x932.png`
+- `/workspace/baiji-v02-fill-375x667.png`
+- `/workspace/baiji-v02-fill-844x390.png`

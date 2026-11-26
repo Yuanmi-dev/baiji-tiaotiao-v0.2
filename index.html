@@ -8,24 +8,27 @@
 <title>白雞跳跳 v0.2</title>
 <style>
   html,body{
-    margin:0;height:100%;background:#6eb6dc;overflow:hidden;
+    margin:0;width:100%;height:100%;height:100dvh;background:#9ad8f5;overflow:hidden;
     font-family:"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
     touch-action:none;user-select:none;-webkit-user-select:none;
     -webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;
     overscroll-behavior:none;position:fixed;inset:0;
   }
-  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#6eb6dc;}
-  canvas{display:block;max-width:100%;max-height:100%;width:auto;height:auto;touch-action:none;background:#bfe9ff;}
+  #wrap{position:fixed;inset:0;width:100%;height:100%;height:100dvh;background:#9ad8f5;}
+  canvas{display:block;width:100%;height:100%;touch-action:none;background:#9ad8f5;}
   #vibBtn{
-    position:fixed;top:calc(12px + env(safe-area-inset-top,0px));right:12px;z-index:5;
+    position:fixed;top:calc(12px + env(safe-area-inset-top,0px));
+    right:calc(12px + env(safe-area-inset-right,0px));z-index:5;
     border:0;border-radius:16px;padding:8px 12px;font-size:13px;line-height:1.2;
     background:rgba(255,255,255,.88);color:#1d2a33;box-shadow:0 1px 4px rgba(0,0,0,.15);
     font-family:inherit;touch-action:manipulation;-webkit-user-select:none;user-select:none;
   }
   #vibBtn[aria-pressed="false"]{background:rgba(0,0,0,.35);color:#fff;}
-  #hint{
-    position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));
-    text-align:center;font-size:11px;color:rgba(20,40,50,.7);pointer-events:none;
+  #hint{display:none;}
+  #safeProbe{
+    position:fixed;pointer-events:none;visibility:hidden;
+    top:env(safe-area-inset-top,0px);left:env(safe-area-inset-left,0px);
+    right:env(safe-area-inset-right,0px);bottom:env(safe-area-inset-bottom,0px);
   }
 </style>
 </head>
@@ -33,6 +36,7 @@
 <div id="wrap"><canvas id="c" width="390" height="844"></canvas></div>
 <button type="button" id="vibBtn" aria-pressed="true">震動 開</button>
 <div id="hint"></div>
+<div id="safeProbe" aria-hidden="true"></div>
 <script>
 /* ============================================================
    白雞跳跳 v0.2  — 難度與手感參數（調這裡即可）
@@ -84,8 +88,10 @@ const CFG = {
   WIDTH_NARROW: [74, 98],
   STEP_UP:   [36, 70],
   STEP_DOWN: [40, 90],
-  // 畫面
-  CAM_X: 110
+  // 畫面：以高度 844 為基準，寬度隨可視區域延伸。CAM_X 是設計寬 390 時雞距左緣的位置。
+  CAM_X: 110,
+  VIEW_AHEAD: 280,   // 雞前方固定可視距離（與設計寬 390-110 相同，畫面變寬不加看前方）
+  MAX_ASPECT: 2      // 世界鏡頭最大寬高比；更寬的螢幕只向左延伸天空／山／地面，不加看前方
 };
 
 // ---- 每日種子：台北時間（Asia/Taipei）的年月日 ----
@@ -113,6 +119,67 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const vibBtn = document.getElementById('vibBtn');
 const hintEl = document.getElementById('hint');
+const wrapEl = document.getElementById('wrap');
+const safeProbe = document.getElementById('safeProbe');
+
+let viewW = CFG.W, viewH = CFG.H, camW = CFG.W, viewPadX = 0, viewScale = 1;
+let safeCss = { t: 0, r: 0, b: 0, l: 0 };
+
+function viewportCss() {
+  const vv = window.visualViewport;
+  if (vv && vv.width > 0 && vv.height > 0) {
+    return { w: vv.width, h: vv.height, left: vv.offsetLeft || 0, top: vv.offsetTop || 0 };
+  }
+  return { w: window.innerWidth || CFG.W, h: window.innerHeight || CFG.H, left: 0, top: 0 };
+}
+function measureSafeCss(vp) {
+  if (!safeProbe) return { t: 0, r: 0, b: 0, l: 0 };
+  const r = safeProbe.getBoundingClientRect();
+  return {
+    t: Math.max(0, r.top - vp.top),
+    l: Math.max(0, r.left - vp.left),
+    r: Math.max(0, (vp.left + vp.w) - r.right),
+    b: Math.max(0, (vp.top + vp.h) - r.bottom)
+  };
+}
+function layout() {
+  const vp = viewportCss();
+  const cssW = Math.max(1, vp.w);
+  const cssH = Math.max(1, vp.h);
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+  wrapEl.style.left = vp.left + 'px';
+  wrapEl.style.top = vp.top + 'px';
+  wrapEl.style.width = cssW + 'px';
+  wrapEl.style.height = cssH + 'px';
+  const bw = Math.max(1, Math.round(cssW * dpr));
+  const bh = Math.max(1, Math.round(cssH * dpr));
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  viewH = CFG.H;
+  viewScale = cssH / viewH;
+  viewW = canvas.width / (canvas.height / viewH);
+  camW = Math.min(viewW, viewH * CFG.MAX_ASPECT);
+  viewPadX = Math.max(0, viewW - camW);
+  safeCss = measureSafeCss(vp);
+  if (chick) updateCam();
+}
+function safePad() {
+  const s = viewScale || 1;
+  return {
+    t: safeCss.t / s,
+    r: safeCss.r / s,
+    b: safeCss.b / s,
+    l: safeCss.l / s
+  };
+}
+function updateCam() {
+  if (!chick) return;
+  const minLeft = Math.min(CFG.CAM_X, camW * (CFG.CAM_X / CFG.W));
+  const screenChickX = Math.max(minLeft, camW - CFG.VIEW_AHEAD);
+  camX = chick.x - screenChickX + (camLook || 0);
+}
 
 const UA = navigator.userAgent || '';
 const VIBRATE_HARDWARE = typeof navigator.vibrate === 'function' && !/iP(hone|ad|od)/.test(UA);
@@ -223,6 +290,7 @@ function reset() {
   ignoreHoldUntilRelease = false;
   hapticLog = [];
   st = 'ready';
+  updateCam();
   ensurePlats();
 }
 
@@ -556,7 +624,7 @@ function stepBody(dt) {
   const lookTarget = CFG.CAM_LOOK;
   const followT = 1 - Math.exp(-CFG.CAM_FOLLOW * dt);
   camLook += (lookTarget - camLook) * followT;
-  camX = Math.max(0, chick.x - CFG.CAM_X + camLook);
+  updateCam();
   ensurePlats();
 }
 
@@ -710,44 +778,67 @@ function drawChargeBar() {
   ctx.restore();
 }
 
+function wrapLines(text, maxW) {
+  const chars = String(text || '');
+  const lines = [];
+  let line = '';
+  for (let i = 0; i < chars.length; i++) {
+    const t = line + chars[i];
+    if (line && ctx.measureText(t).width > maxW) {
+      lines.push(line);
+      line = chars[i];
+    } else line = t;
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [''];
+}
+function drawHills(period, yFoot, color, ridges, parallax, cx, width) {
+  const shift = -((cx * parallax) % period + period) % period;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  const start = shift - period;
+  ctx.moveTo(start, yFoot);
+  const copies = Math.ceil((width - start) / period) + 2;
+  for (let k = 0; k < copies; k++) {
+    const ox = shift + (k - 1) * period;
+    for (let i = 0; i < ridges.length; i++) ctx.lineTo(ox + ridges[i][0], ridges[i][1]);
+  }
+  ctx.lineTo(start + copies * period, yFoot);
+  ctx.lineTo(start, yFoot);
+  ctx.closePath();
+  ctx.fill();
+}
+
 function draw() {
-  const W = CFG.W, H = CFG.H;
+  const W = viewW, H = viewH;
+  const pad = safePad();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const sx = canvas.width / W;
+  const sy = canvas.height / H;
+  ctx.setTransform(sx, 0, 0, sy, 0, 0);
   ctx.save();
   if (shakeX || shakeY) ctx.translate(shakeX, shakeY);
-  // 天空
+  // 天空（鋪滿整個可見寬度）
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, '#9ad8f5');
   sky.addColorStop(0.55, '#bfe9ff');
   sky.addColorStop(1, '#d9f3c9');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
-  // 太陽
+  // 太陽（靠可見區右上）
   ctx.fillStyle = '#ffe27a';
   ctx.beginPath();
   ctx.arc(W - 58, 128, 28, 0, Math.PI * 2);
   ctx.fill();
-  // 遠山（停在中段，不要把谷底蓋住）
-  ctx.fillStyle = '#8ec56e';
-  ctx.beginPath();
-  ctx.moveTo(0, 520);
-  ctx.lineTo(80, 430);
-  ctx.lineTo(160, 500);
-  ctx.lineTo(250, 400);
-  ctx.lineTo(340, 490);
-  ctx.lineTo(390, 450);
-  ctx.lineTo(390, 620);
-  ctx.lineTo(0, 620);
-  ctx.fill();
-  ctx.fillStyle = '#7bb85c';
-  ctx.beginPath();
-  ctx.moveTo(0, 580);
-  ctx.lineTo(120, 500);
-  ctx.lineTo(220, 570);
-  ctx.lineTo(310, 490);
-  ctx.lineTo(390, 560);
-  ctx.lineTo(390, 640);
-  ctx.lineTo(0, 640);
-  ctx.fill();
+  // 遠山：依鏡頭視差橫向延伸，不拉伸
+  const cx = camX - viewPadX;
+  drawHills(390, 620, '#8ec56e',
+    [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]],
+    0.12, cx, W);
+  drawHills(390, 640, '#7bb85c',
+    [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]],
+    0.2, cx, W);
   // 可見深谷：缺口下方看得到墜落區
   const abyss = ctx.createLinearGradient(0, 660, 0, H);
   abyss.addColorStop(0, '#c5e094');
@@ -757,18 +848,22 @@ function draw() {
   ctx.fillStyle = abyss;
   ctx.fillRect(0, 660, W, H - 660);
 
-  // 雲（視差）
-  const cx = camX;
-  for (let i = 0; i < 6; i++) {
+  // 雲（視差，覆蓋整個寬度）
+  const cloudPeriod = 1320;
+  const cloudN = Math.ceil(W / 220) + 6;
+  for (let i = 0; i < cloudN; i++) {
     const base = i * 220;
-    const wx = ((base - cx * 0.28) % 1320 + 1320) % 1320 - 80;
+    const wx = ((base - cx * 0.28) % cloudPeriod + cloudPeriod) % cloudPeriod - 80;
+    // 多鋪一輪，避免寬螢幕右緣空白
     drawCloud(wx, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
+    if (wx + cloudPeriod < W + 80) drawCloud(wx + cloudPeriod, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
   }
 
   ctx.save();
-  ctx.translate(-cx, 0);
+  ctx.translate(viewPadX - camX, 0);
 
   for (const p of plats) {
+    if (p.x + p.w < camX - 40 || p.x > camX + camW + 40) continue;
     // 影子
     ctx.fillStyle = 'rgba(40,70,30,.22)';
     ctx.fillRect(p.x + 4, p.y + CFG.PLAT_THICK, p.w - 4, 8);
@@ -798,35 +893,47 @@ function draw() {
   drawChargeBar();
   ctx.restore();
 
-  // HUD
+  // HUD：避開安全區
+  const hudY = Math.max(86, pad.t + 62);
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(20,40,50,.82)';
   ctx.font = 'bold 56px sans-serif';
-  ctx.fillText(String(score), W / 2, 86);
+  ctx.fillText(String(score), W / 2, hudY);
   ctx.font = '13px sans-serif';
   ctx.fillStyle = 'rgba(20,40,50,.72)';
-  ctx.fillText('今日最佳 ' + best + '　台北 ' + taipeiDateLabel(SEED0), W / 2, 112);
+  ctx.fillText('今日最佳 ' + best + '　台北 ' + taipeiDateLabel(SEED0), W / 2, hudY + 26);
   ctx.font = '12px sans-serif';
-  ctx.fillText('白雞跳跳 v0.2', W / 2, 132);
+  ctx.fillText('白雞跳跳 v0.2', W / 2, hudY + 46);
+
+  const cardW = Math.min(CFG.W - 56, W - 56 - pad.l - pad.r);
+  const cardX = (W - cardW) / 2;
 
   if (st === 'ready') {
+    const hintLines = wrapLines(hintEl.textContent || '', cardW - 40);
+    const cardH = 150 + hintLines.length * 16;
+    const cardY = Math.min(H * 0.58, H - cardH - 24 - pad.b);
     ctx.fillStyle = 'rgba(255,255,255,.86)';
-    roundRect(36, H * 0.58, W - 72, 150, 16);
+    roundRect(cardX, cardY, cardW, cardH, 16);
     ctx.fill();
     ctx.fillStyle = '#1d2a33';
     ctx.font = 'bold 22px sans-serif';
-    ctx.fillText('按住蓄力，放開起跳', W / 2, H * 0.58 + 48);
+    ctx.fillText('按住蓄力，放開起跳', W / 2, cardY + 48);
     ctx.font = '15px sans-serif';
     ctx.fillStyle = '#3a4a55';
-    ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, H * 0.58 + 80);
-    ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, H * 0.58 + 104);
+    ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, cardY + 80);
+    ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, cardY + 104);
     ctx.font = '13px sans-serif';
     ctx.fillStyle = '#5a6a75';
-    ctx.fillText('點擊／空白鍵開始', W / 2, H * 0.58 + 132);
+    ctx.fillText('點擊／空白鍵開始', W / 2, cardY + 132);
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#6a7a85';
+    for (let i = 0; i < hintLines.length; i++) {
+      ctx.fillText(hintLines[i], W / 2, cardY + 152 + i * 16);
+    }
   }
   if (st === 'countdown') {
-    const s = 1 + 0.45 * Math.exp(-8 * countT);
     ctx.save();
+    const s = 1 + 0.45 * Math.exp(-8 * countT);
     ctx.translate(W / 2, H * 0.36);
     ctx.scale(s, s);
     ctx.fillStyle = 'rgba(255,255,255,.88)';
@@ -846,17 +953,25 @@ function draw() {
   if (st === 'over') {
     ctx.fillStyle = 'rgba(20,30,40,.45)';
     ctx.fillRect(0, 0, W, H);
+    const hintLines = wrapLines(hintEl.textContent || '', cardW - 40);
+    const cardH = 168 + hintLines.length * 16 + 8;
+    const cardY = Math.max(pad.t + 24, Math.min(H * 0.38, H - cardH - 24 - pad.b));
     ctx.fillStyle = 'rgba(255,255,255,.94)';
-    roundRect(28, H * 0.38, W - 56, 168, 18);
+    roundRect(cardX, cardY, cardW, cardH, 18);
     ctx.fill();
     ctx.fillStyle = '#1d2a33';
     ctx.font = 'bold 22px sans-serif';
-    ctx.fillText('白雞不是雞，也不會飛', W / 2, H * 0.38 + 50);
+    ctx.fillText('白雞不是雞，也不會飛', W / 2, cardY + 50);
     ctx.font = '18px sans-serif';
     ctx.fillStyle = '#3a4a55';
-    ctx.fillText('本局 ' + score + '　今日最佳 ' + best, W / 2, H * 0.38 + 88);
+    ctx.fillText('本局 ' + score + '　今日最佳 ' + best, W / 2, cardY + 88);
     ctx.font = '15px sans-serif';
-    ctx.fillText('再點一下重來', W / 2, H * 0.38 + 124);
+    ctx.fillText('再點一下重來', W / 2, cardY + 124);
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#6a7a85';
+    for (let i = 0; i < hintLines.length; i++) {
+      ctx.fillText(hintLines[i], W / 2, cardY + 150 + i * 16);
+    }
   }
   if (DEBUG) {
     const next = plats.filter(p => p.id > (onPlatId || lastScoredId)).sort((a, b) => a.id - b.id)[0];
@@ -867,12 +982,14 @@ function draw() {
       'charge ' + charge.toFixed(2) + '  vy ' + Math.round(chick.vy),
       'peak ' + Math.round(lastJump.peak) + '  lastVy ' + Math.round(lastJump.vy),
       'gap ' + gap + '  score ' + score,
-      'coyote ' + Math.max(0, COYOTE_TICKS - (tick - lastGroundTick))
+      'coyote ' + Math.max(0, COYOTE_TICKS - (tick - lastGroundTick)),
+      'viewW ' + Math.round(viewW) + ' camW ' + Math.round(camW)
     ];
     ctx.textAlign = 'left';
     ctx.font = '11px monospace';
     ctx.fillStyle = 'rgba(20,30,40,.72)';
-    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 10, H - 64 + i * 13);
+    const dbgY = H - pad.b - 16 - (lines.length - 1) * 13;
+    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 10 + pad.l, dbgY + i * 13);
   }
   ctx.restore();
 }
@@ -959,7 +1076,8 @@ window.__BAIJI__ = {
       trauma,
       countN, countT, countElapsed, lastCountdownS,
       ignoreHoldUntilRelease,
-      hapticLog: (hapticLog || []).map(e => Object.assign({}, e))
+      hapticLog: (hapticLog || []).map(e => Object.assign({}, e)),
+      viewW, viewH, camW, viewPadX, camX, camLook
     };
   },
   start() {
@@ -986,7 +1104,18 @@ window.__BAIJI__ = {
   setVibrate
 };
 
+function onViewportChange() {
+  layout();
+}
+window.addEventListener('resize', onViewportChange);
+window.addEventListener('orientationchange', onViewportChange);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', onViewportChange);
+  window.visualViewport.addEventListener('scroll', onViewportChange);
+}
+
 syncVibUi();
+layout();
 reset();
 requestAnimationFrame(loop);
 </script>
