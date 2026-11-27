@@ -51,14 +51,11 @@ const CFG = {
   H: 844,
   // 物理（單位：像素、秒）。模擬用固定 60 tick，避免幀率影響跳高。
   TICK: 1 / 60,
-  SCALE_G: 2200,        // 世界尺度：2200 px/s² 對齊 9.81 m/s²，風／拖曳／摩擦換算用，不隨手感改變
-  VERT_SNAP: 1.25,      // 全域垂直節奏加速；跳高不變（v 與 √g 同步，g ∝ s²、v ∝ s）
-  HANG_TIME_CAP: 1.3,   // 相對地球日的滯空上限（遊戲化時間尺度；真實 g 比例仍為 1.62/9.81、3.71/9.81）
-  GRAVITY: 3437.5,      // 跳躍手感重力 = SCALE_G × VERT_SNAP²
-  FALL_GRAVITY_MUL: 2.0, // 下落重力倍數（較不漂）
-  MAX_FALL: 1400,       // 真空下落安全上限（實際用 3 倍）
-  JUMP_VY_MIN: 800,     // 640 × VERT_SNAP
-  JUMP_VY_MAX: 1500,    // 1200 × VERT_SNAP
+  GRAVITY: 2200,        // 上升重力
+  FALL_GRAVITY_MUL: 1.8, // 下落重力倍數（較不漂）
+  MAX_FALL: 1400,       // 下落速度上限
+  JUMP_VY_MIN: 640,     // 輕點的最小起跳速度（向上）
+  JUMP_VY_MAX: 1200,    // 蓄滿的最大起跳速度
   CHARGE_MS: 750,       // 蓄滿所需時間
   RUN_SPEED: 230,       // 水平速度；蓄力時仍會向前跑
   CHICKEN_R: 18,
@@ -157,27 +154,12 @@ const TOD_FORCE = (URL_PARAMS.get('tod') || '').toLowerCase().trim();
 
 /* ============================================================
    天氣與環境物理
-   尺度：CFG.SCALE_G（2200 px/s²）對齊地球 g=9.81 m/s²，
-   因此 1 m = SCALE_G/G_EARTH ≈ 224.3 px。此尺度不隨天體或手感重力改變；
-   月球／火星日重力比例仍為 1.62/9.81、3.71/9.81。
-   跳躍節奏另用遊戲化時間尺度：GRAVITY 與起跳速度已依 VERT_SNAP 同步放大以縮短滯空、保留跳高；
-   低重力日再把滯空壓在 HANG_TIME_CAP（約 1.3 倍地球日）以內，避免月球日變成約 2.5 倍那麼長。
-   拖曳與摩擦公式不變，換算仍走 SCALE_G。每日（台北日期）種子決定天氣，
+   尺度：CFG.GRAVITY（2200 px/s²）對齊地球 g=9.81 m/s²，
+   因此 1 m = GRAVITY/G_EARTH ≈ 224.3 px。此尺度不隨天體改變；
+   月球／火星日只改 g 的比例。每日（台北日期）種子決定天氣，
    同一天所有人條件相同。?weather=id 可強制指定（例如 moon）。
    ============================================================ */
-function pxPerM() { return (CFG.SCALE_G || 2200) / CFG.G_EARTH; }
-// 自然滯空倍率 t ∝ 1/√gMul；遊戲倍率不超過 HANG_TIME_CAP
-function hangNaturalMul(gMul) {
-  return 1 / Math.sqrt(Math.max(1e-8, gMul == null ? 1 : gMul));
-}
-function hangGameMul(gMul) {
-  return Math.min(hangNaturalMul(gMul), CFG.HANG_TIME_CAP);
-}
-// k>1 時同步放大跳躍 g 與起跳速度（h 不變，t 變 1/k）
-function hangAccel() {
-  const gMul = weather && weather.gMul != null ? weather.gMul : 1;
-  return hangNaturalMul(gMul) / hangGameMul(gMul);
-}
+function pxPerM() { return CFG.GRAVITY / CFG.G_EARTH; }
 function seedHash(n) {
   let x = (n >>> 0) ^ 0xA5A5A5A5;
   x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
@@ -331,10 +313,8 @@ function weatherLines(w, env) {
   const lines = [];
   if (w.id === 'moon') {
     lines.push(w.emoji + ' 月球重力 ' + w.gMul.toFixed(2) + 'g');
-    lines.push('滯空約 ' + hangGameMul(w.gMul).toFixed(1) + '×（遊戲化時間尺度）');
   } else if (w.id === 'mars') {
     lines.push(w.emoji + ' 火星重力 ' + w.gMul.toFixed(2) + 'g');
-    lines.push('滯空約 ' + hangGameMul(w.gMul).toFixed(1) + '×（遊戲化時間尺度）');
     const ww = windWords(env.windMs);
     if (ww) lines.push('稀薄大氣　' + ww);
   } else if (w.id === 'hot') {
@@ -402,20 +382,18 @@ function envAt(x) {
   };
 }
 
-// 為保持跳高，初速依 v=√(2gh) 隨 √g 縮放，再乘上 hangAccel（遊戲化時間尺度）
+// 為保持跳高，初速依 v=√(2gh) 隨 √g 縮放（h 固定時 v ∝ √g）
 function jumpSpeed(charge) {
   const t = Math.max(0, Math.min(1, charge));
   const base = CFG.JUMP_VY_MIN + t * (CFG.JUMP_VY_MAX - CFG.JUMP_VY_MIN);
-  const gMul = weather && weather.gMul != null ? weather.gMul : 1;
-  return base * Math.sqrt(gMul) * hangAccel();
+  return base * Math.sqrt(weather.gMul);
 }
 
 // 空氣動力學：a_drag = −(½ C_d A / m) ρ |v_rel| v_rel
 // 寫成像素：a_px = −K ρ |v_px| v_px / (px/m)，K = ½ C_d A / m
 function applyAirTo(s, dt) {
   const env = envAt(s.x);
-  const k = hangAccel();
-  const g = CFG.GRAVITY * env.gMul * k * k;
+  const g = CFG.GRAVITY * env.gMul;
   const gUse = s.vy > 0 ? g * CFG.FALL_GRAVITY_MUL : g;
   const relX = s.vx - env.windPx;
   const relY = s.vy; // 風視為水平
@@ -1590,7 +1568,7 @@ function stepBody(dt) {
   const prevY = chick.y;
   const envNow = envAt(chick.x);
   if (grounded && chick.vy >= 0) {
-    const gGround = (CFG.SCALE_G || 2200) * envNow.gMul;
+    const gGround = CFG.GRAVITY * envNow.gMul;
     const aFric = Math.max(0, envNow.mu) * gGround; // a = μ g
     const tgt = CFG.RUN_SPEED;
     const dv = tgt - chick.vx;
@@ -2126,9 +2104,6 @@ window.__BAIJI__ = {
       weather: weather ? {
         id: weather.id, title: weather.title, emoji: weather.emoji,
         gMul: weather.gMul, rho: weather.rho, mu: weather.mu,
-        hangNatural: hangNaturalMul(weather.gMul),
-        hangGame: hangGameMul(weather.gMul),
-        hangAccel: hangAccel(),
         precip: weather.precip, windBaseMs: weather.windBaseMs,
         gustAmpMs: weather.gustAmpMs, palette: weather.palette,
         segments: (weather.segments || []).map(s => ({ fromX: s.fromX, windMs: s.windMs })),
@@ -2157,9 +2132,6 @@ window.__BAIJI__ = {
     return weather.id;
   },
   jumpSpeed,
-  hangAccel,
-  hangGameMul,
-  hangNaturalMul,
   simJumpTo,
   canLandOn,
   generatePlats(n) {
