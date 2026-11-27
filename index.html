@@ -91,7 +91,28 @@ const CFG = {
   // 畫面：以高度 844 為基準，寬度隨可視區域延伸。CAM_X 是設計寬 390 時雞距左緣的位置。
   CAM_X: 110,
   VIEW_AHEAD: 280,   // 雞前方固定可視距離（與設計寬 390-110 相同，畫面變寬不加看前方）
-  MAX_ASPECT: 2      // 世界鏡頭最大寬高比；更寬的螢幕只向左延伸天空／山／地面，不加看前方
+  MAX_ASPECT: 2,     // 世界鏡頭最大寬高比；更寬的螢幕只向左延伸天空／山／地面，不加看前方
+  // ---- 天氣與環境物理（世界尺度由地球 g 對齊：2200 px/s² = 9.81 m/s²）----
+  G_EARTH: 9.81,      // m/s²，地球標準重力
+  G_MOON: 1.62,       // m/s²，月球表面重力
+  G_MARS: 3.71,       // m/s²，火星表面重力
+  RHO0: 1.225,        // kg/m³，海平面 15°C 的 ISA 空氣密度
+  RHO_HOT: 1.127,     // kg/m³，40°C 同壓下 ρ∝1/T，288.15/313.15×1.225
+  RHO_MARS: 0.020,    // kg/m³，火星近地表平均密度
+  // 拖曳：F_d = ½ ρ C_d A |v_rel| v_rel，方向與相對空速相反（拖曳力方程式）
+  DRAG_CD: 0.47,      // 近似球形／蓬鬆身體的阻力係數
+  DRAG_AREA: 0.05,    // m²，迎風面積
+  DRAG_MASS: 1.5,     // kg，一隻雞的量級
+  MU_DRY: 0.70,       // 乾草地／土的動摩擦係數
+  MU_WET: 0.35,       // 濕滑
+  MU_ICE: 0.10,       // 結冰；地面減速 a = μ g
+  MU_REGOLITH: 0.40,  // 月表風化層
+  RAIN_VTERM: 9,      // m/s，雨滴終端速度量級
+  SNOW_VTERM: 1,      // m/s，雪花終端速度量級
+  WX_PARTICLES: 90,   // 雨／雪／風線顆數
+  GAP_REACH: 0.86,    // 用最大飛距的這一比例當長缺口上限，保證可過
+  GAP_SHORT_REACH: 0.82, // 短缺口相對於最小跳飛距
+  ICE_WIDTH_MUL: 1.25
 };
 
 // ---- 每日種子：台北時間（Asia/Taipei）的年月日 ----
@@ -110,7 +131,473 @@ function taipeiDateLabel(seed) {
 const SEED0 = taipeiSeed();
 const BEST_KEY = 'baijiBest.v02.' + SEED0;
 const VIB_KEY = 'baijiVibrate.v02';
-const DEBUG = /(?:\?|&)debug=1(?:&|$)/.test(location.search || '');
+const URL_PARAMS = new URLSearchParams((location.search || '').replace(/^\?/, ''));
+const DEBUG = URL_PARAMS.get('debug') === '1';
+const WEATHER_FORCE = (URL_PARAMS.get('weather') || '').toLowerCase().trim();
+
+/* ============================================================
+   天氣與環境物理
+   尺度：CFG.GRAVITY（2200 px/s²）對齊地球 g=9.81 m/s²，
+   因此 1 m = GRAVITY/G_EARTH ≈ 224.3 px。此尺度不隨天體改變；
+   月球／火星日只改 g 的比例。每日（台北日期）種子決定天氣，
+   同一天所有人條件相同。?weather=id 可強制指定（例如 moon）。
+   ============================================================ */
+function pxPerM() { return CFG.GRAVITY / CFG.G_EARTH; }
+function seedHash(n) {
+  let x = (n >>> 0) ^ 0xA5A5A5A5;
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0;
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 天氣清單：id 供 ?weather= 使用
+const WEATHER_IDS = ['clear','tailwind','headwind','gusty','rain','storm','ice','snow','hot','moon','mars'];
+
+function buildWeather(id, seed) {
+  const rndw = mulberry32(seedHash(seed ^ 0x9E3779B9 ^ seedHash(id.length * 13 + id.charCodeAt(0))));
+  const range = (a, b) => a + rndw() * (b - a);
+  const gE = CFG.G_EARTH;
+  const rho0 = CFG.RHO0;
+  const base = {
+    id: id,
+    gMul: 1,
+    rho: rho0,
+    mu: CFG.MU_DRY,
+    precip: '',
+    windBaseMs: 0,
+    gustAmpMs: 0,
+    gustLambda: 900,
+    gustPhase: 0,
+    segments: [],
+    palette: 'earth'
+  };
+  if (id === 'clear') {
+    base.title = '晴朗';
+    base.emoji = '☀️';
+  } else if (id === 'tailwind') {
+    base.title = '順風';
+    base.emoji = '🌬️';
+    base.windBaseMs = range(3, 7);
+    base.palette = 'wind';
+  } else if (id === 'headwind') {
+    base.title = '逆風';
+    base.emoji = '🌬️';
+    base.windBaseMs = -range(3, 7);
+    base.palette = 'wind';
+  } else if (id === 'gusty') {
+    base.title = '陣風';
+    base.emoji = '💨';
+    base.windBaseMs = range(-2, 2);
+    base.gustAmpMs = range(3, 6);
+    base.gustLambda = range(700, 1400);
+    base.gustPhase = range(0, Math.PI * 2);
+    // 種子決定的鋒面：關卡中改變平均風向
+    let x = 0;
+    base.segments = [];
+    for (let i = 0; i < 3; i++) {
+      x += (i === 0 ? 0 : range(700, 1300));
+      const dir = rndw() < 0.5 ? -1 : 1;
+      base.segments.push({ fromX: x, windMs: dir * range(2, 6) });
+    }
+    base.palette = 'wind';
+  } else if (id === 'rain') {
+    base.title = '降雨';
+    base.emoji = '🌧️';
+    base.mu = CFG.MU_WET;
+    base.precip = 'rain';
+    base.windBaseMs = range(-2, 3);
+    base.palette = 'rain';
+  } else if (id === 'storm') {
+    base.title = '暴風雨';
+    base.emoji = '⛈️';
+    base.mu = CFG.MU_WET;
+    base.precip = 'rain';
+    base.windBaseMs = -range(7, 11);
+    base.gustAmpMs = range(2, 4);
+    base.gustLambda = range(500, 900);
+    base.gustPhase = range(0, Math.PI * 2);
+    let x = 0;
+    base.segments = [];
+    for (let i = 0; i < 3; i++) {
+      x += (i === 0 ? 0 : range(600, 1100));
+      base.segments.push({ fromX: x, windMs: -range(6, 12) });
+    }
+    base.palette = 'storm';
+  } else if (id === 'ice') {
+    base.title = '路面結冰';
+    base.emoji = '🧊';
+    base.mu = CFG.MU_ICE;
+    base.precip = 'snow';
+    base.windBaseMs = range(-1.5, 2);
+    base.palette = 'ice';
+  } else if (id === 'snow') {
+    base.title = '降雪';
+    base.emoji = '❄️';
+    base.mu = (CFG.MU_WET + CFG.MU_ICE) * 0.5; // 約 0.225，積雪濕滑
+    base.precip = 'snow';
+    base.windBaseMs = range(-2, 4);
+    base.palette = 'snow';
+  } else if (id === 'hot') {
+    base.title = '高溫';
+    base.emoji = '🔥';
+    base.rho = CFG.RHO_HOT;
+    base.windBaseMs = range(0, 2);
+    base.palette = 'hot';
+  } else if (id === 'moon') {
+    // 月球幾乎真空，無氣動拖曳；g_moon/g_earth = 1.62/9.81
+    base.title = '月球日';
+    base.emoji = '🌙';
+    base.gMul = CFG.G_MOON / gE;
+    base.rho = 0;
+    base.mu = CFG.MU_REGOLITH;
+    base.windBaseMs = 0;
+    base.palette = 'moon';
+  } else if (id === 'mars') {
+    base.title = '火星日';
+    base.emoji = '🔴';
+    base.gMul = CFG.G_MARS / gE;
+    base.rho = CFG.RHO_MARS;
+    base.mu = 0.55;
+    base.windBaseMs = range(8, 16); // 火星風速可高，但空氣極稀薄，氣動力很小
+    base.gustAmpMs = range(2, 5);
+    base.gustLambda = range(800, 1500);
+    base.gustPhase = range(0, Math.PI * 2);
+    base.palette = 'mars';
+  } else {
+    base.title = '晴朗';
+    base.emoji = '☀️';
+    base.id = 'clear';
+  }
+  return base;
+}
+
+function chooseWeatherId(seed) {
+  if (WEATHER_FORCE && WEATHER_IDS.indexOf(WEATHER_FORCE) >= 0) return WEATHER_FORCE;
+  return WEATHER_IDS[seedHash(seed) % WEATHER_IDS.length];
+}
+
+function windWords(ms) {
+  const a = Math.abs(ms);
+  if (a < 0.4) return '';
+  const n = a >= 10 ? a.toFixed(0) : a.toFixed(1);
+  return (ms > 0 ? '順風 ' : '逆風 ') + n + ' m/s';
+}
+
+function weatherLines(w, env) {
+  const lines = [];
+  if (w.id === 'moon') {
+    lines.push(w.emoji + ' 月球重力 ' + w.gMul.toFixed(2) + 'g');
+  } else if (w.id === 'mars') {
+    lines.push(w.emoji + ' 火星重力 ' + w.gMul.toFixed(2) + 'g');
+    const ww = windWords(env.windMs);
+    if (ww) lines.push('稀薄大氣　' + ww);
+  } else if (w.id === 'hot') {
+    const ratio = w.rho / CFG.RHO0;
+    lines.push(w.emoji + ' 高溫　空氣密度 ' + ratio.toFixed(2) + ' ρ₀');
+    const ww = windWords(env.windMs);
+    if (ww) lines.push('🌬️ ' + ww);
+  } else if (w.id === 'ice') {
+    lines.push(w.emoji + ' 路面結冰　μ=' + w.mu.toFixed(2));
+    const ww = windWords(env.windMs);
+    if (ww) lines.push('🌬️ ' + ww);
+  } else if (w.id === 'rain' || w.id === 'storm' || w.id === 'snow') {
+    const ww = windWords(env.windMs);
+    lines.push(w.emoji + ' ' + w.title + (ww ? '　' + ww : ''));
+    lines.push('濕滑 μ=' + w.mu.toFixed(2));
+  } else if (w.id === 'gusty') {
+    const ww = windWords(env.windMs);
+    lines.push(w.emoji + ' 陣風' + (ww ? '　目前' + ww : ''));
+  } else {
+    const ww = windWords(env.windMs);
+    if (ww) lines.push(w.emoji + ' ' + ww);
+    else lines.push(w.emoji + ' ' + w.title);
+  }
+  return lines;
+}
+
+let weather = null;
+let wxParts = [];
+let wxStars = [];
+
+function initWeather(seed, forceId) {
+  const id = forceId || chooseWeatherId(seed);
+  weather = buildWeather(id, seed);
+  wxParts = [];
+  wxStars = [];
+  if (weather.palette === 'moon') {
+    const r = mulberry32(seedHash(seed ^ 0xC0FFEE));
+    for (let i = 0; i < 70; i++) {
+      wxStars.push({ x: r(), y: r() * 0.55, s: 0.6 + r() * 1.6, a: 0.45 + r() * 0.5 });
+    }
+  }
+}
+
+function envAt(x) {
+  const w = weather;
+  let windMs = w.windBaseMs;
+  if (w.segments && w.segments.length) {
+    for (let i = 0; i < w.segments.length; i++) {
+      if (x >= w.segments[i].fromX) windMs = w.segments[i].windMs;
+    }
+  }
+  if (w.gustAmpMs) {
+    windMs += w.gustAmpMs * Math.sin(x / w.gustLambda + w.gustPhase);
+  }
+  return {
+    gMul: w.gMul,
+    rho: w.rho,
+    mu: w.mu,
+    precip: w.precip,
+    windMs: windMs,
+    windPx: windMs * pxPerM(),
+    palette: w.palette
+  };
+}
+
+// 為保持跳高，初速依 v=√(2gh) 隨 √g 縮放（h 固定時 v ∝ √g）
+function jumpSpeed(charge) {
+  const t = Math.max(0, Math.min(1, charge));
+  const base = CFG.JUMP_VY_MIN + t * (CFG.JUMP_VY_MAX - CFG.JUMP_VY_MIN);
+  return base * Math.sqrt(weather.gMul);
+}
+
+// 空氣動力學：a_drag = −(½ C_d A / m) ρ |v_rel| v_rel
+// 寫成像素：a_px = −K ρ |v_px| v_px / (px/m)，K = ½ C_d A / m
+function applyAirTo(s, dt) {
+  const env = envAt(s.x);
+  const g = CFG.GRAVITY * env.gMul;
+  const gUse = s.vy > 0 ? g * CFG.FALL_GRAVITY_MUL : g;
+  const relX = s.vx - env.windPx;
+  const relY = s.vy; // 風視為水平
+  const rel = Math.hypot(relX, relY);
+  const K = 0.5 * CFG.DRAG_CD * CFG.DRAG_AREA / CFG.DRAG_MASS;
+  const ppm = pxPerM();
+  if (rel > 1e-6 && env.rho > 1e-8) {
+    const mul = (K * env.rho * rel) / ppm;
+    s.vx -= mul * relX * dt;
+    s.vy -= mul * relY * dt;
+  }
+  s.vy += gUse * dt;
+  if (env.rho > 1e-8) {
+    // 終端速度 v_t = √(2 m g / (ρ C_d A))，只限制下落
+    const vt = Math.sqrt((CFG.DRAG_MASS * (gUse / ppm)) / (0.5 * env.rho * CFG.DRAG_CD * CFG.DRAG_AREA + 1e-12)) * ppm;
+    if (s.vy > 0) s.vy = Math.min(s.vy, vt);
+  } else if (s.vy > CFG.MAX_FALL * 3) {
+    s.vy = CFG.MAX_FALL * 3;
+  }
+}
+
+function simJumpTo(charge, x0, y0, vx0, platY) {
+  const s = { x: x0, y: y0, vx: vx0, vy: -jumpSpeed(charge) };
+  let prevY = s.y;
+  const dt = CFG.TICK;
+  const R = CFG.CHICKEN_R;
+  let peak = 0;
+  for (let i = 0; i < 720; i++) {
+    applyAirTo(s, dt);
+    s.x += s.vx * dt;
+    const newY = s.y + s.vy * dt;
+    peak = Math.max(peak, y0 - Math.min(newY, s.y));
+    if (s.vy >= 0) {
+      const feet0 = prevY + R;
+      const feet1 = newY + R;
+      if (feet0 <= platY + 4 && feet1 >= platY) {
+        return { x: s.x, y: platY - R, landed: true, peak: peak, steps: i + 1 };
+      }
+    }
+    s.y = newY;
+    prevY = s.y;
+    if (s.y > CFG.DEATH_Y) break;
+  }
+  return { x: s.x, y: s.y, landed: false, peak: peak, steps: 0 };
+}
+
+function jumpReach(charge, y0, platY, x0) {
+  const r = simJumpTo(charge, x0, y0, CFG.RUN_SPEED, platY);
+  return r.x - x0;
+}
+
+function fitGap(kind, rawGap, prev, nextY) {
+  const x0 = prev.x + prev.w - 8;
+  const y0 = prev.y - CFG.CHICKEN_R;
+  let r0 = jumpReach(0, y0, nextY, x0);
+  let r1 = jumpReach(1, y0, nextY, x0);
+  if (r1 < r0) { const t = r0; r0 = r1; r1 = t; }
+  // 低重力等飛距變長時，短／中／長缺口都按可達距離等比放大，避免最小跳就越過下一台
+  const shortHi = Math.max(36, r0 * CFG.GAP_SHORT_REACH);
+  const longHi = Math.max(shortHi + 12, r1 * CFG.GAP_REACH);
+  const midLo = Math.min(r0 * 1.05, longHi * 0.72);
+  const midHi = Math.max(midLo + 8, longHi * 0.78);
+  const longLo = Math.min(Math.max(midHi + 6, r0 * 1.10), longHi * 0.96);
+  function band(lo, hi, raw, rawLo, rawHi) {
+    let u = (raw - rawLo) / Math.max(1e-6, rawHi - rawLo);
+    u = Math.max(0, Math.min(1, u));
+    return lo + u * Math.max(0, hi - lo);
+  }
+  let gap;
+  if (kind === 'short') {
+    gap = band(shortHi * 0.72, shortHi, rawGap, CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
+  } else if (kind === 'mid') {
+    gap = band(midLo, midHi, rawGap, CFG.GAP_MID[0], CFG.GAP_MID[1]);
+  } else if (kind === 'long') {
+    gap = band(longLo, longHi, rawGap, CFG.GAP_LONG[0], CFG.GAP_LONG[1]);
+  } else {
+    gap = band(midLo, midHi, rawGap, CFG.GAP_MID[0] - 16, CFG.GAP_MID[1] - 10);
+  }
+  if (!(gap > 0)) gap = shortHi;
+  return Math.max(28, gap);
+}
+
+function canLandOn(prev, next) {
+  const y0 = prev.y - CFG.CHICKEN_R;
+  const tries = [0, 0.12, 0.25, 0.4, 0.55, 0.7, 0.85, 1];
+  const takeoffs = [prev.x + prev.w - 8];
+  const mid = prev.x + prev.w * 0.55;
+  if (mid < takeoffs[0] - 10) takeoffs.push(mid);
+  takeoffs.push(prev.x + Math.min(40, prev.w * 0.3));
+  for (let t = 0; t < takeoffs.length; t++) {
+    const x0 = Math.max(prev.x + 8, takeoffs[t]);
+    for (let i = 0; i < tries.length; i++) {
+      const r = simJumpTo(tries[i], x0, y0, CFG.RUN_SPEED, next.y);
+      if (r.landed && r.x + 8 >= next.x && r.x - 8 <= next.x + next.w) {
+        return { ok: true, charge: tries[i], takeoffX: x0, landX: r.x };
+      }
+    }
+    // 若最小跳已超過平台，再往前提起跳點
+    const over = simJumpTo(0, x0, y0, CFG.RUN_SPEED, next.y);
+    if (over.landed && over.x - 8 > next.x + next.w) continue;
+    // 二分蓄力找可落點
+    let lo = 0, hi = 1, ok = null;
+    for (let k = 0; k < 10; k++) {
+      const midc = (lo + hi) / 2;
+      const r = simJumpTo(midc, x0, y0, CFG.RUN_SPEED, next.y);
+      if (r.landed && r.x + 8 >= next.x && r.x - 8 <= next.x + next.w) { ok = r; ok.charge = midc; break; }
+      if (!r.landed || r.x + 8 < next.x) lo = midc;
+      else hi = midc;
+    }
+    if (ok) return { ok: true, charge: ok.charge, takeoffX: x0, landX: ok.x };
+  }
+  return { ok: false };
+}
+
+function spawnWxPart(W, H, env, anywhere) {
+  const y = anywhere ? Math.random() * H : -20 - Math.random() * 40;
+  return { x: Math.random() * (W + 80) - 40, y: y, a: 0.35 + Math.random() * 0.45, s: 0.6 + Math.random() * 1.2 };
+}
+function updateWx(dt) {
+  if (!weather) return;
+  const W = viewW, H = viewH;
+  const env = envAt((typeof camX === 'number' ? camX : 0) + (typeof camW === 'number' ? camW * 0.5 : 200));
+  const need = (weather.precip === 'rain' || weather.precip === 'snow' || Math.abs(env.windMs) >= 1.2 || weather.palette === 'mars');
+  if (!need) { wxParts = []; return; }
+  const n = CFG.WX_PARTICLES;
+  while (wxParts.length < n) wxParts.push(spawnWxPart(W, H, env, true));
+  while (wxParts.length > n) wxParts.pop();
+  const ppm = pxPerM();
+  for (let i = 0; i < wxParts.length; i++) {
+    const p = wxParts[i];
+    const e = envAt((typeof camX === 'number' ? camX : 0) + p.x);
+    let tvx = 0, tvy = 80;
+    if (weather.precip === 'rain') {
+      tvy = CFG.RAIN_VTERM * ppm;
+      tvx = e.windPx;
+    } else if (weather.precip === 'snow') {
+      tvy = CFG.SNOW_VTERM * ppm;
+      tvx = e.windPx;
+    } else if (weather.palette === 'mars') {
+      tvy = 50 + Math.abs(e.windPx) * 0.02;
+      tvx = e.windPx * 0.35;
+    } else {
+      tvx = e.windPx;
+      tvy = 24;
+    }
+    p.vx = tvx;
+    p.vy = tvy;
+    p.x += tvx * dt;
+    p.y += tvy * dt;
+    if (p.y > H + 30 || p.x < -80 || p.x > W + 80) {
+      p.x = Math.random() * (W + 80) - 40;
+      p.y = -20 - Math.random() * 30;
+    }
+  }
+}
+function drawWx(W, H) {
+  if (!weather) return;
+  if (weather.palette === 'moon' && wxStars.length) {
+    for (let i = 0; i < wxStars.length; i++) {
+      const s = wxStars[i];
+      ctx.fillStyle = 'rgba(255,255,255,' + s.a + ')';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.s, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  if (!wxParts.length) return;
+  const rain = weather.precip === 'rain';
+  const snow = weather.precip === 'snow';
+  for (let i = 0; i < wxParts.length; i++) {
+    const p = wxParts[i];
+    if (rain) {
+      const len = 16;
+      const spd = Math.hypot(p.vx || 0, p.vy || 1) || 1;
+      ctx.strokeStyle = 'rgba(200,220,255,' + (0.35 + p.a * 0.35) + ')';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - (p.vx || 0) / spd * len, p.y - (p.vy || 1) / spd * len);
+      ctx.stroke();
+    } else if (snow) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.55 + p.a * 0.35) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.s * 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (weather.palette === 'mars') {
+      ctx.fillStyle = 'rgba(210,140,90,' + (0.25 + p.a * 0.25) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.s * 0.9, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const len = 22;
+      const spd = Math.hypot(p.vx || 1, p.vy || 0) || 1;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.18 + p.a * 0.18) + ')';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - (p.vx || 1) / spd * len, p.y - (p.vy || 0) / spd * len);
+      ctx.stroke();
+    }
+  }
+}
+
+function skyPalette() {
+  const p = weather ? weather.palette : 'earth';
+  if (p === 'rain') return ['#6a8aa0', '#8aa8b8', '#b8c9b0'];
+  if (p === 'storm') return ['#4a5c70', '#6a7c88', '#8a9080'];
+  if (p === 'snow' || p === 'ice') return ['#c5d8e8', '#dbe7f0', '#e8eef0'];
+  if (p === 'hot') return ['#9ad0f0', '#c8e4a8', '#e8d89a'];
+  if (p === 'moon') return ['#0b1020', '#161c33', '#1c2430'];
+  if (p === 'mars') return ['#e8a070', '#d88858', '#c47040'];
+  if (p === 'wind') return ['#8ec8e8', '#b5e0f5', '#d0eec0'];
+  return ['#9ad8f5', '#bfe9ff', '#d9f3c9'];
+}
+function hillColors() {
+  const p = weather ? weather.palette : 'earth';
+  if (p === 'moon') return ['#6a7080', '#575e6c'];
+  if (p === 'mars') return ['#c46a3a', '#a85830'];
+  if (p === 'snow' || p === 'ice') return ['#9ab0a0', '#7a9488'];
+  if (p === 'storm') return ['#5e7a50', '#4e6844'];
+  if (p === 'rain') return ['#6fa060', '#5e8a50'];
+  return ['#8ec56e', '#7bb85c'];
+}
 const COYOTE_TICKS = Math.round(CFG.COYOTE_S / CFG.TICK);
 const BUFFER_TICKS = Math.round(CFG.JUMP_BUFFER_S / CFG.TICK);
 const NEVER = -1e9;
@@ -253,7 +740,7 @@ function canStartCharge() {
 
 function reset() {
   rngState = SEED0;
-  chick = { x: 80, y: CFG.START_Y - CFG.CHICKEN_R, vy: 0 };
+  chick = { x: 80, y: CFG.START_Y - CFG.CHICKEN_R, vy: 0, vx: CFG.RUN_SPEED };
   plats = [];
   nextPlatId = 1;
   plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: CFG.START_W });
@@ -378,6 +865,11 @@ function ensurePlats() {
     y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
     } // end else (id>2)
     y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
+    gap = fitGap(kind, gap, prev, y);
+    if (weather && weather.mu <= CFG.MU_ICE + 0.05) {
+      w *= CFG.ICE_WIDTH_MUL;
+      if (w < 140) w = 140;
+    }
     plats.push({ id: nextPlatId++, x: prev.x + prev.w + gap, y, w, kind });
   }
 }
@@ -461,7 +953,7 @@ function updateFx(dt) {
 function releaseJump() {
   if (!charging) return;
   const t = Math.max(0, Math.min(1, charge));
-  const vy = CFG.JUMP_VY_MIN + t * (CFG.JUMP_VY_MAX - CFG.JUMP_VY_MIN);
+  const vy = jumpSpeed(t);
   charging = false;
   charge = 0;
   chargedFull = false;
@@ -570,10 +1062,23 @@ function stepBody(dt) {
     }
   }
 
-  // 蓄力時仍向前跑；若跑到平台邊緣且正在蓄力，就以當前力道自動起跳
-  const vx = CFG.RUN_SPEED;
+  // 蓄力時仍向前跑；地面以摩擦 a=μg 把水平速度推向跑步速度；
+  // 空中才明顯受到風與二次方空氣阻力。跑到台邊且正在蓄力則自動起跳。
+  if (chick.vx == null) chick.vx = CFG.RUN_SPEED;
   const prevY = chick.y;
-  let newX = chick.x + vx * dt;
+  const envNow = envAt(chick.x);
+  if (grounded && chick.vy >= 0) {
+    const gGround = CFG.GRAVITY * envNow.gMul;
+    const aFric = Math.max(0, envNow.mu) * gGround; // a = μ g
+    const tgt = CFG.RUN_SPEED;
+    const dv = tgt - chick.vx;
+    const cap = aFric * dt;
+    if (Math.abs(dv) <= cap) chick.vx = tgt;
+    else chick.vx += (dv > 0 ? 1 : -1) * cap;
+  } else {
+    applyAirTo(chick, dt);
+  }
+  let newX = chick.x + chick.vx * dt;
   if (grounded && onPlatId) {
     const cur = plats.find(p => p.id === onPlatId);
     if (cur && newX + 8 > cur.x + cur.w) {
@@ -587,8 +1092,6 @@ function stepBody(dt) {
   chick.x = newX;
 
   if (!grounded) {
-    const g = chick.vy > 0 ? CFG.GRAVITY * CFG.FALL_GRAVITY_MUL : CFG.GRAVITY;
-    chick.vy = Math.min(chick.vy + g * dt, CFG.MAX_FALL);
     const newY = chick.y + chick.vy * dt;
     if (lastJump.airborne) {
       lastJump.peak = Math.max(lastJump.peak, lastJump.startY - Math.min(newY, chick.y));
@@ -819,24 +1322,34 @@ function draw() {
   ctx.setTransform(sx, 0, 0, sy, 0, 0);
   ctx.save();
   if (shakeX || shakeY) ctx.translate(shakeX, shakeY);
-  // 天空（鋪滿整個可見寬度）
+  // 天空（鋪滿整個可見寬度；配色隨天氣）
+  const pal = skyPalette();
   const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, '#9ad8f5');
-  sky.addColorStop(0.55, '#bfe9ff');
-  sky.addColorStop(1, '#d9f3c9');
+  sky.addColorStop(0, pal[0]);
+  sky.addColorStop(0.55, pal[1]);
+  sky.addColorStop(1, pal[2]);
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
-  // 太陽（靠可見區右上）
-  ctx.fillStyle = '#ffe27a';
-  ctx.beginPath();
-  ctx.arc(W - 58, 128, 28, 0, Math.PI * 2);
-  ctx.fill();
+  if (weather && weather.palette === 'moon') {
+    // 星星在 drawWx 畫
+  } else if (weather && weather.palette === 'mars') {
+    ctx.fillStyle = '#f0c090';
+    ctx.beginPath();
+    ctx.arc(W - 58, 128, 18, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.fillStyle = weather && weather.palette === 'storm' ? '#d8d0a8' : '#ffe27a';
+    ctx.beginPath();
+    ctx.arc(W - 58, 128, weather && (weather.palette === 'rain' || weather.palette === 'storm') ? 22 : 28, 0, Math.PI * 2);
+    ctx.fill();
+  }
   // 遠山：依鏡頭視差橫向延伸，不拉伸
   const cx = camX - viewPadX;
-  drawHills(390, 620, '#8ec56e',
+  const hc = hillColors();
+  drawHills(390, 620, hc[0],
     [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]],
     0.12, cx, W);
-  drawHills(390, 640, '#7bb85c',
+  drawHills(390, 640, hc[1],
     [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]],
     0.2, cx, W);
   // 可見深谷：缺口下方看得到墜落區
@@ -848,15 +1361,34 @@ function draw() {
   ctx.fillStyle = abyss;
   ctx.fillRect(0, 660, W, H - 660);
 
-  // 雲（視差，覆蓋整個寬度）
-  const cloudPeriod = 1320;
-  const cloudN = Math.ceil(W / 220) + 6;
-  for (let i = 0; i < cloudN; i++) {
-    const base = i * 220;
-    const wx = ((base - cx * 0.28) % cloudPeriod + cloudPeriod) % cloudPeriod - 80;
-    // 多鋪一輪，避免寬螢幕右緣空白
-    drawCloud(wx, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
-    if (wx + cloudPeriod < W + 80) drawCloud(wx + cloudPeriod, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
+  // 雲（視差，覆蓋整個寬度；月球真空不畫雲）
+  if (!weather || weather.palette !== 'moon') {
+    const cloudPeriod = 1320;
+    const cloudN = Math.ceil(W / 220) + 6;
+    const prevFill = ctx.fillStyle;
+    if (weather && weather.palette === 'mars') ctx.fillStyle = 'rgba(255,210,170,.55)';
+    for (let i = 0; i < cloudN; i++) {
+      const base = i * 220;
+      const wx = ((base - cx * 0.28) % cloudPeriod + cloudPeriod) % cloudPeriod - 80;
+      if (weather && weather.palette === 'mars') {
+        ctx.beginPath();
+        ctx.arc(wx, 160 + (i % 3) * 28, 18, 0, Math.PI * 2);
+        ctx.arc(wx + 22, 150 + (i % 3) * 28, 14, 0, Math.PI * 2);
+        ctx.arc(wx + 40, 162 + (i % 3) * 28, 16, 0, Math.PI * 2);
+        ctx.fill();
+        if (wx + cloudPeriod < W + 80) {
+          ctx.beginPath();
+          ctx.arc(wx + cloudPeriod, 160 + (i % 3) * 28, 18, 0, Math.PI * 2);
+          ctx.arc(wx + cloudPeriod + 22, 150 + (i % 3) * 28, 14, 0, Math.PI * 2);
+          ctx.arc(wx + cloudPeriod + 40, 162 + (i % 3) * 28, 16, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        drawCloud(wx, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
+        if (wx + cloudPeriod < W + 80) drawCloud(wx + cloudPeriod, 150 + (i % 3) * 36, 0.8 + (i % 3) * 0.15);
+      }
+    }
+    ctx.fillStyle = prevFill;
   }
 
   ctx.save();
@@ -867,17 +1399,22 @@ function draw() {
     // 影子
     ctx.fillStyle = 'rgba(40,70,30,.22)';
     ctx.fillRect(p.x + 4, p.y + CFG.PLAT_THICK, p.w - 4, 8);
-    // 土
-    ctx.fillStyle = '#8b5a2b';
+    // 土（月表／火星／結冰會換色）
+    const palP = weather ? weather.palette : 'earth';
+    ctx.fillStyle = palP === 'moon' ? '#8a8f9a' : palP === 'mars' ? '#8a4a28' : palP === 'ice' ? '#7a8a96' : '#8b5a2b';
     roundRect(p.x, p.y, p.w, CFG.PLAT_THICK + 10, 6);
     ctx.fill();
-    // 草皮
-    ctx.fillStyle = '#7cc35b';
+    // 草皮或冰面
+    ctx.fillStyle = palP === 'moon' ? '#b0b6c0' : palP === 'mars' ? '#c46a3a' : palP === 'ice' ? '#e8f4ff' : palP === 'snow' ? '#dce8de' : palP === 'rain' || palP === 'storm' ? '#5ea34a' : '#7cc35b';
     roundRect(p.x, p.y, p.w, 12, 6);
     ctx.fill();
     ctx.fillRect(p.x, p.y + 6, p.w, 8);
+    if (palP === 'ice') {
+      ctx.fillStyle = 'rgba(255,255,255,.55)';
+      ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, 3);
+    }
     // 草尖
-    ctx.strokeStyle = '#67b049';
+    ctx.strokeStyle = palP === 'ice' || palP === 'snow' ? '#cfe4f2' : palP === 'moon' ? '#9aa0aa' : '#67b049';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     for (let gx = p.x + 6; gx < p.x + p.w - 4; gx += 8) {
@@ -893,42 +1430,63 @@ function draw() {
   drawChargeBar();
   ctx.restore();
 
+  drawWx(W, H);
+
   // HUD：避開安全區
+  const hudInk = (weather && (weather.palette === 'moon' || weather.palette === 'storm')) ? 'rgba(240,244,250,.9)' : 'rgba(20,40,50,.82)';
+  const hudInk2 = (weather && (weather.palette === 'moon' || weather.palette === 'storm')) ? 'rgba(220,228,236,.75)' : 'rgba(20,40,50,.72)';
+  const envHud = envAt(chick.x);
+  const wxHud = weatherLines(weather, envHud);
   const hudY = Math.max(86, pad.t + 62);
   ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(20,40,50,.82)';
+  ctx.fillStyle = hudInk;
   ctx.font = 'bold 56px sans-serif';
   ctx.fillText(String(score), W / 2, hudY);
   ctx.font = '13px sans-serif';
-  ctx.fillStyle = 'rgba(20,40,50,.72)';
+  ctx.fillStyle = hudInk2;
   ctx.fillText('今日最佳 ' + best + '　台北 ' + taipeiDateLabel(SEED0), W / 2, hudY + 26);
   ctx.font = '12px sans-serif';
   ctx.fillText('白雞跳跳 v0.2', W / 2, hudY + 46);
+  ctx.font = '13px sans-serif';
+  ctx.fillStyle = hudInk;
+  for (let i = 0; i < wxHud.length; i++) ctx.fillText(wxHud[i], W / 2, hudY + 66 + i * 16);
 
   const cardW = Math.min(CFG.W - 56, W - 56 - pad.l - pad.r);
   const cardX = (W - cardW) / 2;
 
   if (st === 'ready') {
     const hintLines = wrapLines(hintEl.textContent || '', cardW - 40);
-    const cardH = 150 + hintLines.length * 16;
-    const cardY = Math.min(H * 0.58, H - cardH - 24 - pad.b);
+    const wxLines = wxHud;
+    const cardH = 168 + hintLines.length * 16 + wxLines.length * 18;
+    const cardY = Math.min(H * 0.54, H - cardH - 24 - pad.b);
     ctx.fillStyle = 'rgba(255,255,255,.86)';
     roundRect(cardX, cardY, cardW, cardH, 16);
     ctx.fill();
     ctx.fillStyle = '#1d2a33';
+    ctx.font = 'bold 18px sans-serif';
+    let cy = cardY + 28;
+    for (let i = 0; i < wxLines.length; i++) {
+      ctx.fillText(wxLines[i], W / 2, cy);
+      cy += 20;
+    }
+    cy += 6;
     ctx.font = 'bold 22px sans-serif';
-    ctx.fillText('按住蓄力，放開起跳', W / 2, cardY + 48);
+    ctx.fillText('按住蓄力，放開起跳', W / 2, cy);
+    cy += 32;
     ctx.font = '15px sans-serif';
     ctx.fillStyle = '#3a4a55';
-    ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, cardY + 80);
-    ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, cardY + 104);
+    ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, cy);
+    cy += 24;
+    ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, cy);
+    cy += 24;
     ctx.font = '13px sans-serif';
     ctx.fillStyle = '#5a6a75';
-    ctx.fillText('點擊／空白鍵開始', W / 2, cardY + 132);
+    ctx.fillText('點擊／空白鍵開始', W / 2, cy);
+    cy += 22;
     ctx.font = '11px sans-serif';
     ctx.fillStyle = '#6a7a85';
     for (let i = 0; i < hintLines.length; i++) {
-      ctx.fillText(hintLines[i], W / 2, cardY + 152 + i * 16);
+      ctx.fillText(hintLines[i], W / 2, cy + i * 16);
     }
   }
   if (st === 'countdown') {
@@ -983,7 +1541,9 @@ function draw() {
       'peak ' + Math.round(lastJump.peak) + '  lastVy ' + Math.round(lastJump.vy),
       'gap ' + gap + '  score ' + score,
       'coyote ' + Math.max(0, COYOTE_TICKS - (tick - lastGroundTick)),
-      'viewW ' + Math.round(viewW) + ' camW ' + Math.round(camW)
+      'viewW ' + Math.round(viewW) + ' camW ' + Math.round(camW),
+      'wx ' + weather.id + ' wind ' + envHud.windMs.toFixed(1) + ' m/s',
+      'g×' + envHud.gMul.toFixed(3) + ' ρ ' + envHud.rho.toFixed(3) + ' μ ' + envHud.mu.toFixed(2)
     ];
     ctx.textAlign = 'left';
     ctx.font = '11px monospace';
@@ -1007,6 +1567,7 @@ function loop(ts) {
   if (n >= 5) acc = 0;
   updateShake(frameDt);
   updateFx(frameDt);
+  updateWx(frameDt);
   draw();
   requestAnimationFrame(loop);
 }
@@ -1065,7 +1626,7 @@ window.__BAIJI__ = {
   get() {
     return {
       st, score, best, seed: SEED0,
-      x: chick.x, y: chick.y, vy: chick.vy,
+      x: chick.x, y: chick.y, vy: chick.vy, vx: chick.vx,
       grounded, charging, charge,
       vibrateOn, vibrateSupported: VIBRATE_HARDWARE,
       lastJump: Object.assign({}, lastJump),
@@ -1077,8 +1638,73 @@ window.__BAIJI__ = {
       countN, countT, countElapsed, lastCountdownS,
       ignoreHoldUntilRelease,
       hapticLog: (hapticLog || []).map(e => Object.assign({}, e)),
-      viewW, viewH, camW, viewPadX, camX, camLook
+      viewW, viewH, camW, viewPadX, camX, camLook,
+      weather: weather ? {
+        id: weather.id, title: weather.title, emoji: weather.emoji,
+        gMul: weather.gMul, rho: weather.rho, mu: weather.mu,
+        precip: weather.precip, windBaseMs: weather.windBaseMs,
+        gustAmpMs: weather.gustAmpMs, palette: weather.palette,
+        segments: (weather.segments || []).map(s => ({ fromX: s.fromX, windMs: s.windMs })),
+        lines: weatherLines(weather, envAt(chick.x))
+      } : null,
+      env: envAt(chick.x)
     };
+  },
+  weatherIds: WEATHER_IDS,
+  setWeather(id) {
+    initWeather(SEED0, id);
+    reset();
+    return weather.id;
+  },
+  jumpSpeed,
+  simJumpTo,
+  canLandOn,
+  generatePlats(n) {
+    const keep = CFG.LOOKAHEAD;
+    CFG.LOOKAHEAD = Math.max(keep, n);
+    ensurePlats();
+    CFG.LOOKAHEAD = keep;
+    return plats.length;
+  },
+  checkCourse(n) {
+    return window.__BAIJI__.checkWith(SEED0, weather.id, n || 40);
+  },
+  checkWith(seed, weatherId, n) {
+    const saved = { rng: rngState, weather: weather, plats: plats, next: nextPlatId, camX: camX, wxParts: wxParts, wxStars: wxStars };
+    initWeather(seed, weatherId);
+    rngState = seed;
+    plats = [];
+    nextPlatId = 1;
+    plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: CFG.START_W, kind: 'start' });
+    const keep = CFG.LOOKAHEAD;
+    const keepCam = camX;
+    camX = -1e9;
+    CFG.LOOKAHEAD = Math.max(keep, n || 40);
+    ensurePlats();
+    CFG.LOOKAHEAD = keep;
+    camX = keepCam;
+    const list = plats.slice().sort((a, b) => a.id - b.id);
+    const gaps = [];
+    let ok = true;
+    for (let i = 0; i < list.length - 1; i++) {
+      const r = canLandOn(list[i], list[i + 1]);
+      const gap = list[i + 1].x - (list[i].x + list[i].w);
+      gaps.push({
+        from: list[i].id, to: list[i + 1].id, kind: list[i + 1].kind || '',
+        gap: gap, dy: list[i].y - list[i + 1].y,
+        ok: !!r.ok, charge: r.ok ? r.charge : null
+      });
+      if (!r.ok) ok = false;
+    }
+    const result = { ok, weather: weather.id, seed: seed, gaps, platCount: list.length };
+    rngState = saved.rng;
+    weather = saved.weather;
+    plats = saved.plats;
+    nextPlatId = saved.next;
+    camX = saved.camX;
+    wxParts = saved.wxParts;
+    wxStars = saved.wxStars;
+    return result;
   },
   start() {
     if (st === 'ready') startCountdown();
@@ -1116,6 +1742,7 @@ if (window.visualViewport) {
 
 syncVibUi();
 layout();
+initWeather(SEED0);
 reset();
 requestAnimationFrame(loop);
 </script>
