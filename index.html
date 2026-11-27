@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="format-detection" content="telephone=no">
+<link rel="preload" as="image" href="assets/bg/sky.webp">
+<link rel="preload" as="image" href="assets/bg/far.webp">
+<link rel="preload" as="image" href="assets/bg/mid.webp">
 <title>白雞跳跳 v0.2</title>
 <style>
   html,body{
@@ -16,14 +19,17 @@
   }
   #wrap{position:fixed;inset:0;width:100%;height:100%;height:100dvh;background:#9ad8f5;}
   canvas{display:block;width:100%;height:100%;touch-action:none;background:#9ad8f5;}
-  #vibBtn{
+  #topBtns{
     position:fixed;top:calc(12px + env(safe-area-inset-top,0px));
     right:calc(12px + env(safe-area-inset-right,0px));z-index:5;
+    display:flex;gap:8px;
+  }
+  #vibBtn,#muteBtn{
     border:0;border-radius:16px;padding:8px 12px;font-size:13px;line-height:1.2;
     background:rgba(255,255,255,.88);color:#1d2a33;box-shadow:0 1px 4px rgba(0,0,0,.15);
     font-family:inherit;touch-action:manipulation;-webkit-user-select:none;user-select:none;
   }
-  #vibBtn[aria-pressed="false"]{background:rgba(0,0,0,.35);color:#fff;}
+  #vibBtn[aria-pressed="false"],#muteBtn[aria-pressed="false"]{background:rgba(0,0,0,.35);color:#fff;}
   #hint{display:none;}
   #placeBar{
     position:fixed;left:0;right:0;z-index:5;
@@ -82,11 +88,11 @@
     background:#fff;color:#1d2a33;touch-action:manipulation;
   }
   #adFake button.secondary{background:rgba(255,255,255,.16);color:#fff;}
-  #vibBtn,#locBtn,#adContinueBtn{
+  #vibBtn,#muteBtn,#locBtn,#adContinueBtn{
     border:1.5px solid #24483c;background:#fff9e7;color:#24483c;
     border-radius:20px;box-shadow:0 3px 0 #24483c;font-weight:700;
   }
-  #vibBtn[aria-pressed="false"]{background:#314c42;color:#fff9e7;}
+  #vibBtn[aria-pressed="false"],#muteBtn[aria-pressed="false"]{background:#314c42;color:#fff9e7;}
   #placeBar.visible{width:fit-content;max-width:calc(100% - 32px);box-sizing:border-box;
     margin:auto;padding:9px 16px;background:#fffaea;border:1px solid #526e5c;
     border-radius:16px;gap:3px;}
@@ -103,7 +109,10 @@
 </head>
 <body>
 <div id="wrap"><canvas id="c" width="390" height="844"></canvas></div>
-<button type="button" id="vibBtn" aria-pressed="true">震動 開</button>
+<div id="topBtns">
+  <button type="button" id="muteBtn" aria-pressed="true">聲音 開</button>
+  <button type="button" id="vibBtn" aria-pressed="true">震動 開</button>
+</div>
 <div id="placeBar">
   <div class="placeDate" id="placeDate"></div>
   <div class="placeNote">今日關卡依台灣時間更新</div>
@@ -295,6 +304,7 @@ function placeLine() {
 const SEED0 = taipeiSeed();
 const BEST_KEY = 'baijiBest.v02.' + SEED0;
 const VIB_KEY = 'baijiVibrate.v02';
+const MUTE_KEY = 'baijiMute.v02';
 const URL_PARAMS = new URLSearchParams((location.search || '').replace(/^\?/, ''));
 const DEBUG = URL_PARAMS.get('debug') === '1';
 const WEATHER_FORCE = (URL_PARAMS.get('weather') || '').toLowerCase().trim();
@@ -1194,6 +1204,17 @@ function drawSkyBackdrop(W, H) {
   } else {
     ctx.drawImage(sky, 0, 0, sky.width, sky.height, 0, 0, W, H);
   }
+  const palSky = weather ? weather.palette : 'earth';
+  if (bgOk(bgImgs.sky) && palSky !== 'moon' && palSky !== 'mars') {
+    let a = 0.88;
+    if (palSky === 'storm') a = 0.28;
+    else if (palSky === 'rain') a = 0.42;
+    else if (palSky === 'hot') a = 0.55;
+    else if (palSky === 'snow' || palSky === 'ice') a = 0.5;
+    if (isDarkSky()) a *= 0.42;
+    const cxSky = typeof camX === 'number' ? camX : 0;
+    drawTiledLayer(bgImgs.sky, H, H, 0.04, cxSky, W, a);
+  }
 }
 function drawPrecip(W, H, layer) {
   // layer 0 = 背景細絲／遠雪，1 = 前景
@@ -1375,6 +1396,135 @@ function setVibrate(on) {
   if (!vibrateOn) { trauma = 0; shakeX = 0; shakeY = 0; }
   syncVibUi();
 }
+
+const bgImgs = { sky: new Image(), far: new Image(), mid: new Image() };
+['sky', 'far', 'mid'].forEach(function (k) { bgImgs[k].src = 'assets/bg/' + k + '.webp'; });
+const bgTintCache = {};
+function bgOk(img) { return img && img.complete && img.naturalWidth > 0; }
+function modPositive(n, m) { return ((n % m) + m) % m; }
+function tintedBg(img, key, color, amount) {
+  if (!bgOk(img)) return img;
+  if (!(amount > 0)) return img;
+  const ck = key + '|' + img.naturalWidth + 'x' + img.naturalHeight + '|' + color + '|' + amount;
+  if (bgTintCache[ck]) return bgTintCache[ck];
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  g.globalCompositeOperation = 'source-atop';
+  g.globalAlpha = amount;
+  g.fillStyle = color;
+  g.fillRect(0, 0, c.width, c.height);
+  bgTintCache[ck] = c;
+  return c;
+}
+function drawTiledLayer(img, yBottom, drawH, parallax, cx, width, alpha) {
+  if (!bgOk(img) || drawH <= 0) return;
+  const scale = drawH / img.naturalHeight;
+  const tw = img.naturalWidth * scale;
+  if (tw < 8) return;
+  let x = -modPositive(cx * parallax, tw);
+  ctx.save();
+  if (alpha != null && alpha < 1) ctx.globalAlpha = alpha;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  for (; x < width; x += tw) ctx.drawImage(img, x, yBottom - drawH, tw, drawH);
+  ctx.restore();
+}
+
+const AUDIO_FILES = {
+  charge: 'assets/audio/charge',
+  jump: 'assets/audio/jump',
+  land: 'assets/audio/land',
+  perfect: 'assets/audio/perfect',
+  fail: 'assets/audio/fail',
+  tap: 'assets/audio/tap',
+  bgm: 'assets/audio/bgm'
+};
+const VOL_SFX = 0.34, VOL_BGM = 0.15;
+const muteBtn = document.getElementById('muteBtn');
+let mutedOn = localStorage.getItem(MUTE_KEY) === '1';
+const audio = { ctx: null, master: null, sfxG: null, bgmG: null, bufs: {}, unlocked: false, bgmNode: null };
+function audioMuted() { return !!(mutedOn || adsSoundMuted); }
+function applyAudioMute() {
+  if (!audio.master || !audio.ctx) return;
+  const on = audio.unlocked && !audioMuted();
+  audio.master.gain.setTargetAtTime(on ? 1 : 0, audio.ctx.currentTime, 0.03);
+}
+function syncMuteUi() {
+  if (!muteBtn) return;
+  muteBtn.setAttribute('aria-pressed', mutedOn ? 'false' : 'true');
+  muteBtn.textContent = mutedOn ? '聲音 關' : '聲音 開';
+}
+function setMuted(on) {
+  mutedOn = !!on;
+  localStorage.setItem(MUTE_KEY, mutedOn ? '1' : '0');
+  applyAudioMute();
+  syncMuteUi();
+}
+function preloadAudioBuf(base, key) {
+  const urls = [base + '.mp3', base + '.ogg'];
+  function tryAt(i) {
+    if (i >= urls.length || !audio.ctx) return;
+    fetch(urls[i]).then(function (r) { return r.ok ? r.arrayBuffer() : Promise.reject(); })
+      .then(function (ab) { return audio.ctx.decodeAudioData(ab.slice(0)); })
+      .then(function (buf) {
+        audio.bufs[key] = buf;
+        if (key === 'bgm') startBgm();
+      })
+      .catch(function () { tryAt(i + 1); });
+  }
+  tryAt(0);
+}
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!audio.ctx) {
+      audio.ctx = new AC();
+      audio.master = audio.ctx.createGain();
+      audio.sfxG = audio.ctx.createGain();
+      audio.bgmG = audio.ctx.createGain();
+      audio.sfxG.gain.value = VOL_SFX;
+      audio.bgmG.gain.value = VOL_BGM;
+      audio.sfxG.connect(audio.master);
+      audio.bgmG.connect(audio.master);
+      audio.master.connect(audio.ctx.destination);
+      audio.master.gain.value = 0;
+      Object.keys(AUDIO_FILES).forEach(function (k) { preloadAudioBuf(AUDIO_FILES[k], k); });
+    }
+    if (audio.ctx.state === 'suspended') audio.ctx.resume();
+    audio.unlocked = true;
+    applyAudioMute();
+    startBgm();
+  } catch (e) {}
+}
+function playSfx(key, opts) {
+  opts = opts || {};
+  if (!audio.ctx || !audio.unlocked || audioMuted()) return null;
+  const buf = audio.bufs[key];
+  if (!buf) return null;
+  const src = audio.ctx.createBufferSource();
+  src.buffer = buf;
+  if (opts.rate) src.playbackRate.value = opts.rate;
+  const g = audio.ctx.createGain();
+  g.gain.value = opts.vol != null ? opts.vol : 1;
+  src.connect(g);
+  g.connect(audio.sfxG);
+  try { src.start(); } catch (e) { return null; }
+  return src;
+}
+function startBgm() {
+  if (!audio.ctx || !audio.unlocked || audio.bgmNode || !audio.bufs.bgm) return;
+  const src = audio.ctx.createBufferSource();
+  src.buffer = audio.bufs.bgm;
+  src.loop = true;
+  src.connect(audio.bgmG);
+  try { src.start(); } catch (e) { return; }
+  audio.bgmNode = src;
+}
+syncMuteUi();
 function addTrauma(amount) {
   trauma = Math.min(1, (trauma || 0) + amount);
 }
@@ -1669,6 +1819,7 @@ function startPress() {
     charge = 0;
     chargedFull = false;
     bufferedJump = false;
+    playSfx('charge');
   } else {
     bufferedJump = true;
     bufferedCharge = 0;
@@ -1760,6 +1911,7 @@ function releaseJump() {
   stretchT = CFG.JUMP_STRETCH_S;
   spawnJumpDust();
   haptic('jump');
+  playSfx('jump', { vol: 0.55 + 0.45 * t });
   // 若不在物理步內，立刻跑完一步並重繪，讓放開當幀位置就上升
   if (!inStep) {
     acc -= CFG.JUMP_LAUNCH_DT;
@@ -1781,25 +1933,34 @@ function landOn(p) {
   chick.vy = 0;
   grounded = true;
   lastGroundTick = tick;
+  const didLand = lastJump.airborne;
   if (lastJump.airborne) {
     lastJump.peak = Math.max(lastJump.peak, lastJump.startY - chick.y);
     lastJump.airborne = false;
     squashT = CFG.LAND_SQUASH;
     spawnLandDust();
+    playSfx('land');
   }
+  let justScored = false;
   if (p.id !== onPlatId && p.id > lastScoredId) {
     score += 1;
     lastScoredId = p.id;
     haptic('score');
+    justScored = true;
   }
   onPlatId = p.id;
   lastSafePlatId = p.id;
   lastSafePlatSnap = { id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || '' };
+  if (didLand && justScored) {
+    const mid = p.x + p.w * 0.5;
+    if (Math.abs(chick.x - mid) <= p.w * 0.22) playSfx('perfect');
+  }
   if (isHeld() && !charging) {
     charging = true;
     charge = 0;
     chargedFull = false;
     bufferedJump = false;
+    playSfx('charge');
   } else if (bufferedJump && tick - lastPressTick <= BUFFER_TICKS) {
     charging = true;
     charge = Math.max(0, Math.min(1, bufferedCharge));
@@ -1820,6 +1981,7 @@ function die() {
   tOver = 0;
   if (typeof syncSceneChrome === 'function') syncSceneChrome();
   haptic('hit');
+  playSfx('fail');
   if (score > best) {
     best = score;
     localStorage.setItem(BEST_KEY, String(best));
@@ -2318,12 +2480,26 @@ function drawMarsTerrain(W, H, cx) {
 function drawEarthTerrain(W, H, cx) {
   const pal = weather ? weather.palette : 'earth';
   const hc = hillColors();
-  const far = [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]];
-  const near = [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]];
-  drawHills(390, 620, hc[0], far, 0.12, cx, W);
-  if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, far, 0.12, cx, W);
-  drawHills(390, 640, hc[1], near, 0.2, cx, W);
-  if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, near, 0.2, cx, W);
+  if (bgOk(bgImgs.far) && bgOk(bgImgs.mid)) {
+    const yFoot = 660;
+    let tintColor = hc[1], tintAmt = 0;
+    if (pal === 'storm') tintAmt = 0.45;
+    else if (pal === 'rain') tintAmt = isDarkSky() ? 0.4 : 0.28;
+    else if (pal === 'snow' || pal === 'ice') { tintColor = '#e8f0f6'; tintAmt = isDarkSky() ? 0.28 : 0.22; }
+    else if (pal === 'hot') { tintColor = '#e8c070'; tintAmt = 0.22; }
+    else if (isDarkSky()) { tintColor = '#1a2430'; tintAmt = 0.4; }
+    const farImg = tintedBg(bgImgs.far, 'far', tintColor, tintAmt);
+    const midImg = tintedBg(bgImgs.mid, 'mid', tintColor, tintAmt);
+    drawTiledLayer(farImg, yFoot - 8, 220, 0.12, cx, W, 1);
+    drawTiledLayer(midImg, yFoot + 4, 186, 0.22, cx, W, 1);
+  } else {
+    const far = [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]];
+    const near = [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]];
+    drawHills(390, 620, hc[0], far, 0.12, cx, W);
+    if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, far, 0.12, cx, W);
+    drawHills(390, 640, hc[1], near, 0.2, cx, W);
+    if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, near, 0.2, cx, W);
+  }
   const abyss = ctx.createLinearGradient(0, 660, 0, H);
   const ab = abyssStops();
   for (let i = 0; i < ab.length; i++) abyss.addColorStop(ab[i][0], ab[i][1]);
@@ -2693,7 +2869,7 @@ function loop(ts) {
 let pointerId = null;
 let keyHeld = false;
 function onPointerDown(ev) {
-  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn, #placeBar, #locBtn, #adContinueBtn, #adFake')) return;
+  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn, #muteBtn, #topBtns, #placeBar, #locBtn, #adContinueBtn, #adFake')) return;
   ev.preventDefault();
   if (pointerId !== null) return;
   pointerId = ev.pointerId;
@@ -2730,9 +2906,23 @@ window.addEventListener('touchstart', ev => {
 }, { passive: false });
 document.addEventListener('selectstart', ev => ev.preventDefault());
 
+window.addEventListener('pointerdown', function () { unlockAudio(); }, true);
+window.addEventListener('keydown', function () { unlockAudio(); }, true);
+if (muteBtn) {
+  muteBtn.addEventListener('click', ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    unlockAudio();
+    if (!mutedOn) playSfx('tap');
+    setMuted(!mutedOn);
+  });
+  muteBtn.addEventListener('pointerdown', ev => ev.stopPropagation());
+}
 vibBtn.addEventListener('click', ev => {
   ev.preventDefault();
   ev.stopPropagation();
+  unlockAudio();
+  playSfx('tap');
   setVibrate(!vibrateOn);
 });
 vibBtn.addEventListener('pointerdown', ev => ev.stopPropagation());
@@ -2740,6 +2930,8 @@ const locBtn = document.getElementById('locBtn');
 if (locBtn) {
   locBtn.addEventListener('click', ev => {
     ev.preventDefault();
+    unlockAudio();
+    playSfx('tap');
     ev.stopPropagation();
     requestPlace();
   });
@@ -3100,6 +3292,7 @@ function showContinueBtn() {
 function pauseForAd() {
   adsPaused = true;
   adsSoundMuted = true;
+  applyAudioMute();
   charging = false;
   pendingRestart = false;
   if (typeof window.adConfig === 'function' && adsUseGoogle()) {
@@ -3110,8 +3303,9 @@ function resumeAfterAd() {
   adsPaused = false;
   adsSoundMuted = false;
   hideFakeAd();
+  applyAudioMute();
   if (typeof window.adConfig === 'function' && adsUseGoogle()) {
-    try { window.adConfig({ sound: 'off' }); } catch (e) {} // 目前尚無遊戲音效
+    try { window.adConfig({ sound: 'off' }); } catch (e) {}
   }
 }
 function hideFakeAd() {
@@ -3387,6 +3581,7 @@ function initAds() {
   adCompletedRuns = adCompletedRuns || 0;
   adsPaused = false;
   adsSoundMuted = false;
+  if (typeof applyAudioMute === 'function') applyAudioMute();
   continueUsed = !!continueUsed;
   hideContinueBtn();
   hideFakeAd();
