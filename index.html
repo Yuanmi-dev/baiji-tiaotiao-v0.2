@@ -147,6 +147,13 @@ const CFG = {
   GAP_REACH: 0.86,    // 用最大飛距的這一比例當長缺口上限，保證可過
   GAP_SHORT_REACH: 0.82, // 短缺口相對於最小跳飛距
   ICE_WIDTH_MUL: 1.25,
+  // ---- 前段暖身難度曲線（不改重力／起跳速度）----
+  RAMP_PLATFORMS: 6,          // 前 N 個平台（含起始台）為暖身
+  REACTION_S: 0.28,           // 人類落地後再開始蓄力的反應時間（秒）
+  MIN_PLATFORM_LEN_FOR_CHARGE: 280, // 暖身台長度下限（像素）；實際還會依跑速／風／摩擦加長
+  LAND_INSET_PAD: 48,         // 預留落地落點到台端的內縮
+  TAKEOFF_PAD: 8,             // 台緣起跳餘裕（與模擬一致）
+  HUMAN_CHARGE_ERR_S: 0.08,   // 人類蓄力時間誤差 ± 秒（檢查用）
   // ---- 天氣視覺（質感對齊 iPhone 天氣 App／動態桌布；不影響物理與公平性）----
   FX_QUALITY: 'auto',     // auto | high | medium | low；也可 ?fx=low
   FX_MAX_DPR_HIGH: 2.5,
@@ -526,14 +533,14 @@ function simJumpTo(charge, x0, y0, vx0, platY) {
       const feet0 = prevY + R;
       const feet1 = newY + R;
       if (feet0 <= platY + 4 && feet1 >= platY) {
-        return { x: s.x, y: platY - R, landed: true, peak: peak, steps: i + 1 };
+        return { x: s.x, y: platY - R, landed: true, peak: peak, steps: i + 1, vx: s.vx };
       }
     }
     s.y = newY;
     prevY = s.y;
     if (s.y > CFG.DEATH_Y) break;
   }
-  return { x: s.x, y: s.y, landed: false, peak: peak, steps: 0 };
+  return { x: s.x, y: s.y, landed: false, peak: peak, steps: 0, vx: s.vx };
 }
 
 function jumpReach(charge, y0, platY, x0) {
@@ -1341,7 +1348,7 @@ function reset() {
   chick = { x: 80, y: CFG.START_Y - CFG.CHICKEN_R, vy: 0, vx: CFG.RUN_SPEED };
   plats = [];
   nextPlatId = 1;
-  plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: CFG.START_W });
+  plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: startPlatformWidth() });
   score = 0;
   tOver = 0;
   camX = 0;
@@ -1430,49 +1437,137 @@ function pickKind(progress) {
   return 'up';
 }
 
+// 前段暖身：台上跑完「反應 + 蓄滿」所需距離（含落地後殘餘水平速度與摩擦）
+function travelDuring(vx0, seconds, env) {
+  let x = 0, vx = vx0;
+  const dt = CFG.TICK;
+  const steps = Math.max(1, Math.ceil(seconds / dt));
+  const gGround = CFG.GRAVITY * (env && env.gMul != null ? env.gMul : 1);
+  const aFric = Math.max(0, env && env.mu != null ? env.mu : CFG.MU_DRY) * gGround;
+  const tgt = CFG.RUN_SPEED;
+  for (let i = 0; i < steps; i++) {
+    const dv = tgt - vx;
+    const cap = aFric * dt;
+    if (Math.abs(dv) <= cap) vx = tgt;
+    else vx += (dv > 0 ? 1 : -1) * cap;
+    x += vx * dt;
+  }
+  return x;
+}
+function estimateLandVx(env) {
+  let maxVx = CFG.RUN_SPEED;
+  const charges = [0.4, 0.7, 1];
+  const dt = CFG.TICK;
+  for (let c = 0; c < charges.length; c++) {
+    const s = { x: 0, y: 0, vx: CFG.RUN_SPEED, vy: -jumpSpeed(charges[c]) };
+    for (let i = 0; i < 180; i++) {
+      applyAirTo(s, dt);
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (i > 8 && s.vy > 0 && s.y >= 0) break;
+    }
+    if (s.vx > maxVx) maxVx = s.vx;
+  }
+  return maxVx;
+}
+function neededPlatformWidth(env, vxLand, opts) {
+  opts = opts || {};
+  const tNeed = CFG.REACTION_S + CFG.CHARGE_MS / 1000;
+  const landPad = opts.landPad != null ? opts.landPad : CFG.LAND_INSET_PAD;
+  const takePad = CFG.TAKEOFF_PAD != null ? CFG.TAKEOFF_PAD : 8;
+  const run = travelDuring(vxLand != null ? vxLand : CFG.RUN_SPEED, tNeed, env);
+  const computed = landPad + run + takePad;
+  const floor = CFG.MIN_PLATFORM_LEN_FOR_CHARGE || 0;
+  return Math.ceil(Math.max(floor, computed));
+}
+function rampT(platId) {
+  const n = CFG.RAMP_PLATFORMS || 0;
+  if (n <= 1) return 1;
+  if (platId <= 1) return 0;
+  return Math.max(0, Math.min(1, (platId - 1) / (n - 1)));
+}
+function lerpNum(a, b, t) {
+  return a + (b - a) * t;
+}
+function startPlatformWidth() {
+  const env = envAt(0);
+  if (!isRampPlat(1)) return CFG.START_W;
+  const tNeed = CFG.REACTION_S + CFG.CHARGE_MS / 1000;
+  const startX = 80;
+  return Math.max(
+    CFG.START_W,
+    Math.ceil(startX + travelDuring(CFG.RUN_SPEED, tNeed, env) + (CFG.TAKEOFF_PAD || 8))
+  );
+}
+function rampGap(kind, t) {
+  let lo, hi;
+  if (kind === 'short') { lo = CFG.GAP_SHORT[0]; hi = CFG.GAP_SHORT[1]; }
+  else if (kind === 'mid') { lo = CFG.GAP_MID[0]; hi = CFG.GAP_MID[1]; }
+  else if (kind === 'long') { lo = CFG.GAP_LONG[0]; hi = CFG.GAP_LONG[1]; }
+  else { lo = CFG.GAP_MID[0] - 16; hi = CFG.GAP_MID[1] - 10; }
+  const easyLo = CFG.GAP_SHORT[0];
+  const easyHi = CFG.GAP_SHORT[0] + Math.max(16, (CFG.GAP_SHORT[1] - CFG.GAP_SHORT[0]) * 0.5);
+  const gLo = lerpNum(easyLo, lo, t);
+  const gHi = lerpNum(easyHi, hi, t);
+  return randRange(Math.min(gLo, gHi), Math.max(gLo, gHi));
+}
+function isRampPlat(platId) {
+  return platId <= (CFG.RAMP_PLATFORMS || 0);
+}
+
 function ensurePlats() {
   while (plats.length && plats[0].x + plats[0].w < camX - 80) plats.shift();
   while (plats.length < CFG.LOOKAHEAD) {
     const prev = plats[plats.length - 1];
     const late = prev.id > 8;
+    const nextId = prev.id + 1;
+    const t = rampT(nextId);
     let gap, w, y, kind;
-    // 前兩個缺口固定好過，並讓開場就看得到第一個缺口
-    if (prev.id === 1) {
-      kind = 'short';
-      gap = randRange(CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
-      w = randRange(220, 260);
-      y = prev.y + randRange(-8, 8);
-    } else if (prev.id === 2) {
-      kind = 'mid';
-      gap = randRange(CFG.GAP_MID[0], CFG.GAP_MID[1] - 8);
-      w = randRange(150, 190);
-      y = prev.y + randRange(-16, 10);
+    if (isRampPlat(nextId)) {
+      // 前 RAMP_PLATFORMS 台：長度保證能反應＋蓄滿，缺口與高低差由小漸增
+      if (t < 0.35) kind = 'short';
+      else if (t < 0.75) kind = rnd() < 0.72 ? 'mid' : 'short';
+      else {
+        kind = pickKind(prev.id - 1);
+        if (kind === 'long' && t < 1) kind = 'mid';
+        if (kind === 'step') kind = 'mid';
+      }
+      gap = rampGap(kind, t);
+      const env = envAt(prev.x + prev.w);
+      const vxL = Math.max(CFG.RUN_SPEED, estimateLandVx(env));
+      w = neededPlatformWidth(env, vxL) + randRange(0, 24);
+      const easy = 8;
+      let dyLo = -12, dyHi = 12;
+      if (kind === 'mid') { dyLo = -20; dyHi = 16; }
+      else if (kind === 'long') { dyLo = 0; dyHi = CFG.STEP_DOWN[1] * 0.4; }
+      const lo = lerpNum(-easy, dyLo, t);
+      const hi = lerpNum(easy, dyHi, t);
+      y = prev.y + randRange(Math.min(lo, hi), Math.max(lo, hi));
     } else {
-    kind = pickKind(prev.id - 1);
-    if (kind === 'short') {
-      gap = randRange(CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
-      w = late && rnd() < 0.45
-        ? randRange(CFG.WIDTH_NARROW[0], CFG.WIDTH_NARROW[1])
-        : randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
-      y = prev.y + randRange(-12, 12);
-    } else if (kind === 'mid') {
-      gap = randRange(CFG.GAP_MID[0], CFG.GAP_MID[1]);
-      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
-      y = prev.y + (rnd() < 0.5 ? randRange(-20, 20) : 0);
-    } else if (kind === 'long') {
-      gap = randRange(CFG.GAP_LONG[0], CFG.GAP_LONG[1]);
-      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1] + 20);
-      y = prev.y + randRange(0, CFG.STEP_DOWN[1] * 0.4);
-    } else {
-      gap = randRange(CFG.GAP_MID[0] - 16, CFG.GAP_MID[1] - 10);
-      w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
-      y = prev.y - randRange(CFG.STEP_UP[0], CFG.STEP_UP[1]);
+      kind = pickKind(prev.id - 1);
+      if (kind === 'short') {
+        gap = randRange(CFG.GAP_SHORT[0], CFG.GAP_SHORT[1]);
+        w = late && rnd() < 0.45
+          ? randRange(CFG.WIDTH_NARROW[0], CFG.WIDTH_NARROW[1])
+          : randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+        y = prev.y + randRange(-12, 12);
+      } else if (kind === 'mid') {
+        gap = randRange(CFG.GAP_MID[0], CFG.GAP_MID[1]);
+        w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+        y = prev.y + (rnd() < 0.5 ? randRange(-20, 20) : 0);
+      } else if (kind === 'long') {
+        gap = randRange(CFG.GAP_LONG[0], CFG.GAP_LONG[1]);
+        w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1] + 20);
+        y = prev.y + randRange(0, CFG.STEP_DOWN[1] * 0.4);
+      } else {
+        gap = randRange(CFG.GAP_MID[0] - 16, CFG.GAP_MID[1] - 10);
+        w = randRange(CFG.WIDTH_SAFE[0], CFG.WIDTH_SAFE[1]);
+        y = prev.y - randRange(CFG.STEP_UP[0], CFG.STEP_UP[1]);
+      }
     }
     y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
-    } // end else (id>2)
-    y = Math.max(CFG.PLAT_Y_MIN, Math.min(CFG.PLAT_Y_MAX, y));
     gap = fitGap(kind, gap, prev, y);
-    if (weather && weather.mu <= CFG.MU_ICE + 0.05) {
+    if (!isRampPlat(nextId) && weather && weather.mu <= CFG.MU_ICE + 0.05) {
       w *= CFG.ICE_WIDTH_MUL;
       if (w < 140) w = 140;
     }
@@ -2583,6 +2678,184 @@ if (locBtn) {
 }
 
 // 供 headless 驗證使用
+function slideOnGround(x, vx, dt) {
+  const env = envAt(x);
+  const gGround = CFG.GRAVITY * env.gMul;
+  const aFric = Math.max(0, env.mu) * gGround;
+  const tgt = CFG.RUN_SPEED;
+  const dv = tgt - vx;
+  const cap = aFric * dt;
+  if (Math.abs(dv) <= cap) vx = tgt;
+  else vx += (dv > 0 ? 1 : -1) * cap;
+  return { x: x + vx * dt, vx: vx };
+}
+function runOnlyTo(x, vx, seconds, edge) {
+  const dt = CFG.TICK;
+  let t = 0, auto = false;
+  const cap = seconds < 0 ? 0 : seconds;
+  while (t < cap - 1e-9) {
+    const s = slideOnGround(x, vx, dt);
+    x = s.x; vx = s.vx;
+    t += dt;
+    if (x >= edge) { auto = true; x = edge; break; }
+  }
+  return { x: x, vx: vx, t: t, auto: auto };
+}
+function timeToEdge(x, vx, edge) {
+  return runOnlyTo(x, vx, 8, edge);
+}
+function runChargeTo(x, vx, chargeTime, edge) {
+  const dt = CFG.TICK;
+  let charge = 0, charged = 0, auto = false;
+  while (charged < chargeTime - 1e-9) {
+    const s = slideOnGround(x, vx, dt);
+    x = s.x; vx = s.vx;
+    charged += dt;
+    charge = Math.min(1, charge + dt * (1000 / CFG.CHARGE_MS));
+    if (x >= edge) { auto = true; x = edge; break; }
+  }
+  return { x: x, vx: vx, charge: charge, auto: auto, charged: charged };
+}
+function humanJumpOk(charge, x, y, vx, next) {
+  const jmp = window.__BAIJI__
+    ? window.__BAIJI__.simJumpTo(charge, x, y, vx, next.y)
+    : simJumpTo(charge, x, y, vx, next.y);
+  const ok = !!(jmp.landed && jmp.x + 8 >= next.x && jmp.x - 8 <= next.x + next.w);
+  return { ok: ok, jmp: jmp };
+}
+function tryHumanCharge(x, vx, y, edge, next, chargeTime) {
+  // 台夠長時先跑到「剛好蓄完就到台緣」，需要短跳時就先跑再輕點
+  const arrive = timeToEdge(x, vx, edge);
+  let sx = x, sv = vx;
+  if (chargeTime < arrive.t - 1e-9) {
+    const wait = arrive.t - chargeTime;
+    const ran = runOnlyTo(x, vx, wait, edge);
+    sx = ran.x; sv = ran.vx;
+  }
+  const run = runChargeTo(sx, sv, chargeTime, edge);
+  const r = humanJumpOk(run.charge, run.x, y, run.vx, next);
+  return { ok: r.ok, jmp: r.jmp, x: run.x, vx: run.vx, charge: run.charge, auto: run.auto, waited: chargeTime < arrive.t - 1e-9 };
+}
+function pickHumanCharge(x, vx, y, edge, next) {
+  const goods = [];
+  for (let k = 0; k <= 20; k++) {
+    const c = k / 20;
+    const r = tryHumanCharge(x, vx, y, edge, next, c * (CFG.CHARGE_MS / 1000));
+    if (r.ok) goods.push(c);
+  }
+  if (!goods.length) return null;
+  const err = CFG.HUMAN_CHARGE_ERR_S || 0.08;
+  let best = goods[(goods.length / 2) | 0], bestScore = -1;
+  for (let i = 0; i < goods.length; i++) {
+    const c = goods[i];
+    let score = 0;
+    for (let e = 0; e < 3; e++) {
+      const dtErr = (e - 1) * err;
+      const r = tryHumanCharge(x, vx, y, edge, next, Math.max(0, c * (CFG.CHARGE_MS / 1000) + dtErr));
+      if (r.ok) score++;
+    }
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return best;
+}
+
+function checkHuman(seed, weatherId, n, opts) {
+  opts = opts || {};
+  const reactionS = opts.reactionS != null ? opts.reactionS : CFG.REACTION_S;
+  const chargeErr = opts.chargeErr != null ? opts.chargeErr : 0;
+  const saved = {
+    rng: rngState, weather: weather, plats: plats, next: nextPlatId, camX: camX,
+    wxParts: wxParts, wxStars: wxStars
+  };
+  initWeather(seed, weatherId);
+  rngState = seed;
+  plats = [];
+  nextPlatId = 1;
+  const startX = 80;
+  plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: startPlatformWidth(), kind: 'start' });
+  const keep = CFG.LOOKAHEAD;
+  const keepCam = camX;
+  camX = -1e9;
+  CFG.LOOKAHEAD = Math.max(keep, (n || 10) + 1);
+  ensurePlats();
+  CFG.LOOKAHEAD = keep;
+  camX = keepCam;
+  const list = plats.slice().sort((a, b) => a.id - b.id);
+  const dt = CFG.TICK;
+  const R = CFG.CHICKEN_R;
+  let x = startX, vx = CFG.RUN_SPEED;
+  const jumps = [];
+  let okAll = true;
+  const limit = Math.min((n || 10), list.length - 1);
+  for (let i = 0; i < limit; i++) {
+    const plat = list[i];
+    const next = list[i + 1];
+    const edge = plat.x + plat.w - 8;
+    const y = plat.y - R;
+    const rec = {
+      from: plat.id, to: next.id, kind: next.kind || '',
+      w: plat.w, nextW: next.w, gap: next.x - (plat.x + plat.w),
+      dy: plat.y - next.y, landX: x, landVx: vx, ok: false, why: ''
+    };
+    rec.usable = edge - x;
+    if (x < plat.x - 8 || x > plat.x + plat.w + 8) {
+      rec.why = 'not-on-plat';
+      jumps.push(rec); okAll = false; break;
+    }
+    let tReact = 0, leftEdge = false;
+    while (tReact < reactionS) {
+      const sld = slideOnGround(x, vx, dt);
+      x = sld.x; vx = sld.vx; tReact += dt;
+      if (x >= edge) { leftEdge = true; break; }
+    }
+    if (leftEdge) {
+      const r = humanJumpOk(0, edge, y, vx, next);
+      rec.ok = r.ok; rec.charge = 0; rec.takeoffX = edge;
+      rec.why = rec.ok ? 'coyote' : 'ran-off-during-reaction';
+      rec.auto = true;
+      jumps.push(rec);
+      if (!rec.ok) { okAll = false; break; }
+      x = r.jmp.x; vx = r.jmp.vx != null ? r.jmp.vx : CFG.RUN_SPEED;
+      continue;
+    }
+    const xAfterReact = x, vxAfterReact = vx;
+    rec.reactLeft = edge - xAfterReact;
+    const intended = pickHumanCharge(x, vx, y, edge, next);
+    if (intended == null) {
+      rec.why = 'no-charge-works-after-reaction';
+      rec.takeoffX = x;
+      jumps.push(rec); okAll = false; break;
+    }
+    const chargeTime = Math.max(0, intended * (CFG.CHARGE_MS / 1000) + chargeErr);
+    const trial = tryHumanCharge(xAfterReact, vxAfterReact, y, edge, next, chargeTime);
+    rec.ok = trial.ok;
+    rec.charge = trial.charge;
+    rec.intended = intended;
+    rec.takeoffX = trial.x;
+    rec.auto = trial.auto;
+    rec.why = rec.ok ? (trial.auto ? 'auto-jump' : 'release') : (trial.auto ? 'auto-jump-miss' : 'release-miss');
+    jumps.push(rec);
+    if (!rec.ok) { okAll = false; break; }
+    x = trial.jmp.x;
+    vx = trial.jmp.vx != null ? trial.jmp.vx : CFG.RUN_SPEED;
+  }
+  const result = {
+    ok: okAll, weather: weather.id, seed: seed, reactionS: reactionS, chargeErr: chargeErr,
+    jumps: jumps, platCount: list.length,
+    plats: list.slice(0, limit + 1).map(function (p) {
+      return { id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || 'start' };
+    })
+  };
+  rngState = saved.rng;
+  weather = saved.weather;
+  plats = saved.plats;
+  nextPlatId = saved.next;
+  camX = saved.camX;
+  wxParts = saved.wxParts;
+  wxStars = saved.wxStars;
+  return result;
+}
+
 window.__BAIJI__ = {
   CFG,
   SEED0,
@@ -2653,13 +2926,14 @@ window.__BAIJI__ = {
   checkCourse(n) {
     return window.__BAIJI__.checkWith(SEED0, weather.id, n || 40);
   },
+  checkHuman,
   checkWith(seed, weatherId, n) {
     const saved = { rng: rngState, weather: weather, plats: plats, next: nextPlatId, camX: camX, wxParts: wxParts, wxStars: wxStars };
     initWeather(seed, weatherId);
     rngState = seed;
     plats = [];
     nextPlatId = 1;
-    plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: CFG.START_W, kind: 'start' });
+    plats.push({ id: nextPlatId++, x: 0, y: CFG.START_Y, w: startPlatformWidth(), kind: 'start' });
     const keep = CFG.LOOKAHEAD;
     const keepCam = camX;
     camX = -1e9;
