@@ -25,6 +25,33 @@
   }
   #vibBtn[aria-pressed="false"]{background:rgba(0,0,0,.35);color:#fff;}
   #hint{display:none;}
+  #placeBar{
+    position:fixed;left:0;right:0;z-index:5;
+    bottom:calc(10px + env(safe-area-inset-bottom,0px));
+    display:none;flex-direction:column;align-items:center;gap:5px;
+    padding:0 16px;text-align:center;font-family:inherit;pointer-events:none;
+  }
+  #placeBar.visible{display:flex;}
+  #placeBar .placeDate{
+    font-size:13px;line-height:1.3;color:#1d2a33;
+    background:rgba(255,255,255,.88);border-radius:12px;padding:4px 10px;
+    box-shadow:0 1px 3px rgba(0,0,0,.12);
+  }
+  #placeBar .placeNote{font-size:12px;color:#1d2a33;text-shadow:0 1px 0 rgba(255,255,255,.5);}
+  #placeBar .privacy,#placeBar .placeMsg{
+    font-size:10px;line-height:1.4;max-width:340px;color:#3a4a55;
+  }
+  #locBtn{
+    pointer-events:auto;touch-action:manipulation;-webkit-user-select:none;user-select:none;
+    border:0;border-radius:16px;padding:8px 14px;font-size:14px;line-height:1.2;
+    font-family:inherit;background:rgba(255,255,255,.92);color:#1d2a33;
+    box-shadow:0 1px 4px rgba(0,0,0,.15);
+  }
+  #locBtn:disabled{opacity:.7;}
+  #placeBar.dark .placeDate,#placeBar.dark #locBtn{background:rgba(16,20,28,.82);color:#f2f5f8;}
+  #placeBar.dark .placeNote,#placeBar.dark .privacy,#placeBar.dark .placeMsg{
+    color:#e8eef4;text-shadow:0 1px 2px rgba(0,0,0,.55);
+  }
   #safeProbe{
     position:fixed;pointer-events:none;visibility:hidden;
     top:env(safe-area-inset-top,0px);left:env(safe-area-inset-left,0px);
@@ -35,6 +62,13 @@
 <body>
 <div id="wrap"><canvas id="c" width="390" height="844"></canvas></div>
 <button type="button" id="vibBtn" aria-pressed="true">震動 開</button>
+<div id="placeBar">
+  <div class="placeDate" id="placeDate"></div>
+  <div class="placeNote">今日關卡依台灣時間更新</div>
+  <button type="button" id="locBtn">顯示我的位置</button>
+  <div class="privacy">位置只在你點選後於裝置上查詢城市名，不會上傳或儲存。</div>
+  <div class="placeMsg" id="placeMsg"></div>
+</div>
 <div id="hint"></div>
 <div id="safeProbe" aria-hidden="true"></div>
 <script>
@@ -143,6 +177,56 @@ function taipeiDateLabel(seed) {
   return s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
 }
 
+// 畫面日期依裝置時區；每日種子仍只用台北日期，全玩家同一關
+function deviceTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Taipei';
+  } catch (e) {
+    return 'Asia/Taipei';
+  }
+}
+const DEVICE_TZ = deviceTimeZone();
+const TZ_PLACE_ZH = {
+  'Asia/Taipei': '台北', 'Asia/Shanghai': '上海', 'Asia/Hong_Kong': '香港',
+  'Asia/Macau': '澳門', 'Asia/Tokyo': '東京', 'Asia/Seoul': '首爾',
+  'Asia/Singapore': '新加坡', 'Asia/Bangkok': '曼谷', 'Asia/Jakarta': '雅加達',
+  'Asia/Kuala_Lumpur': '吉隆坡', 'Asia/Manila': '馬尼拉', 'Asia/Ho_Chi_Minh': '胡志明市',
+  'Asia/Makassar': '望加錫', 'Asia/Chongqing': '重慶', 'Asia/Harbin': '哈爾濱',
+  'Australia/Sydney': '雪梨', 'Australia/Melbourne': '墨爾本',
+  'Pacific/Auckland': '奧克蘭', 'Pacific/Honolulu': '檀香山',
+  'America/Los_Angeles': '洛杉磯', 'America/Vancouver': '溫哥華',
+  'America/New_York': '紐約', 'America/Chicago': '芝加哥',
+  'America/Toronto': '多倫多', 'America/Sao_Paulo': '聖保羅',
+  'Europe/London': '倫敦', 'Europe/Paris': '巴黎', 'Europe/Berlin': '柏林',
+  'Europe/Amsterdam': '阿姆斯特丹', 'Europe/Rome': '羅馬',
+  'Europe/Madrid': '馬德里', 'Europe/Zurich': '蘇黎世',
+  'UTC': 'UTC', 'Etc/UTC': 'UTC', 'Etc/GMT': 'GMT'
+};
+function tzPlaceName(tz) {
+  if (TZ_PLACE_ZH[tz]) return TZ_PLACE_ZH[tz];
+  const part = String(tz || '').split('/').pop() || '';
+  return part.replace(/_/g, ' ') || tz || '本機';
+}
+function deviceDateLabel() {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: DEVICE_TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+  } catch (e) {
+    return taipeiDateLabel(taipeiSeed());
+  }
+}
+
+let locState = {
+  status: 'idle', // idle | asking | ok | denied | error | unsupported
+  label: tzPlaceName(DEVICE_TZ),
+  fromGeo: false,
+  msg: ''
+};
+function placeLine() {
+  return locState.label + '　' + deviceDateLabel();
+}
+
 const SEED0 = taipeiSeed();
 const BEST_KEY = 'baijiBest.v02.' + SEED0;
 const VIB_KEY = 'baijiVibrate.v02';
@@ -156,8 +240,9 @@ const TOD_FORCE = (URL_PARAMS.get('tod') || '').toLowerCase().trim();
    天氣與環境物理
    尺度：CFG.GRAVITY（2200 px/s²）對齊地球 g=9.81 m/s²，
    因此 1 m = GRAVITY/G_EARTH ≈ 224.3 px。此尺度不隨天體改變；
-   月球／火星日只改 g 的比例。每日（台北日期）種子決定天氣，
-   同一天所有人條件相同。?weather=id 可強制指定（例如 moon）。
+   月球／火星日只改 g 的比例。每日種子與天氣仍依台北（Asia/Taipei）日期，
+   同一天所有人條件相同；畫面上的日期與地區則依裝置時區，定位需玩家自行點選。
+   ?weather=id 可強制指定（例如 moon）。
    ============================================================ */
 function pxPerM() { return CFG.GRAVITY / CFG.G_EARTH; }
 function seedHash(n) {
@@ -308,36 +393,46 @@ function windWords(ms) {
   const n = a >= 10 ? a.toFixed(0) : a.toFixed(1);
   return (ms > 0 ? '順風 ' : '逆風 ') + n + ' m/s';
 }
-
+function windArrow(ms) {
+  if (Math.abs(ms) < 0.4) return '';
+  // 正值＝順風（向右），負值＝逆風（向左）
+  return ms > 0 ? '→' : '←';
+}
+function weatherFeel(w) {
+  if (!w) return '';
+  if (w.id === 'moon' || w.id === 'mars') return '飄更久';
+  if (w.id === 'ice') return '很滑';
+  if (w.id === 'snow' || w.id === 'rain' || w.id === 'storm') return '濕滑';
+  if (w.id === 'tailwind') return '飛得更遠';
+  if (w.id === 'headwind') return '飛距較短';
+  if (w.id === 'gusty') return '風向會變';
+  if (w.id === 'hot') return '阻力較小';
+  return '';
+}
+function weatherDetail(w, env) {
+  if (!w) return '';
+  if (w.id === 'moon' || w.id === 'mars') return '重力 ' + w.gMul.toFixed(2) + 'g';
+  if (w.id === 'hot') return '空氣密度 ' + (w.rho / CFG.RHO0).toFixed(2) + ' ρ₀';
+  if (w.id === 'ice') return '路面結冰';
+  const ww = windWords(env ? env.windMs : w.windBaseMs);
+  if (ww) return ww;
+  if (w.id === 'clear') return '地球重力';
+  return w.title;
+}
+function weatherHeadline(w, env) {
+  if (!w) return '';
+  const feel = weatherFeel(w);
+  const det = weatherDetail(w, env);
+  let s = w.emoji + ' ' + w.title;
+  if (det && det !== w.title) s += '　' + det;
+  if (feel) s += ' · ' + feel;
+  return s;
+}
 function weatherLines(w, env) {
+  // 仍提供多行摘要（開始卡／除錯）；畫面主提示改走 headline + 徽章
   const lines = [];
-  if (w.id === 'moon') {
-    lines.push(w.emoji + ' 月球重力 ' + w.gMul.toFixed(2) + 'g');
-  } else if (w.id === 'mars') {
-    lines.push(w.emoji + ' 火星重力 ' + w.gMul.toFixed(2) + 'g');
-    const ww = windWords(env.windMs);
-    if (ww) lines.push('稀薄大氣　' + ww);
-  } else if (w.id === 'hot') {
-    const ratio = w.rho / CFG.RHO0;
-    lines.push(w.emoji + ' 高溫　空氣密度 ' + ratio.toFixed(2) + ' ρ₀');
-    const ww = windWords(env.windMs);
-    if (ww) lines.push('🌬️ ' + ww);
-  } else if (w.id === 'ice') {
-    lines.push(w.emoji + ' 路面結冰　μ=' + w.mu.toFixed(2));
-    const ww = windWords(env.windMs);
-    if (ww) lines.push('🌬️ ' + ww);
-  } else if (w.id === 'rain' || w.id === 'storm' || w.id === 'snow') {
-    const ww = windWords(env.windMs);
-    lines.push(w.emoji + ' ' + w.title + (ww ? '　' + ww : ''));
-    lines.push('濕滑 μ=' + w.mu.toFixed(2));
-  } else if (w.id === 'gusty') {
-    const ww = windWords(env.windMs);
-    lines.push(w.emoji + ' 陣風' + (ww ? '　目前' + ww : ''));
-  } else {
-    const ww = windWords(env.windMs);
-    if (ww) lines.push(w.emoji + ' ' + ww);
-    else lines.push(w.emoji + ' ' + w.title);
-  }
+  const head = weatherHeadline(w, env);
+  if (head) lines.push(head);
   return lines;
 }
 
@@ -358,6 +453,7 @@ function initWeather(seed, forceId) {
   skyCache.key = '';
   rebuildSprites();
   ensureStars();
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
 }
 
 function envAt(x) {
@@ -885,7 +981,8 @@ function drawStars(W, H) {
   }
 }
 function drawEarth(W, H) {
-  const x = W * 0.22, y = H * 0.16, r = 34;
+  // 放在左上天區，避開分數與天氣徽章
+  const x = W - 64, y = 168, r = 30;
   const atmo = ctx.createRadialGradient(x, y, r * 0.92, x, y, r * 1.55);
   atmo.addColorStop(0, 'rgba(110,170,255,0)');
   atmo.addColorStop(0.55, 'rgba(90,160,255,0.22)');
@@ -1151,6 +1248,7 @@ function layout() {
   viewPadX = Math.max(0, viewW - camW);
   safeCss = measureSafeCss(vp);
   if (chick) updateCam();
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
 }
 function safePad() {
   const s = viewScale || 1;
@@ -1186,7 +1284,7 @@ let lastScoredId, nextPlatId, lastJump;
 let pendingRestart, tick, lastGroundTick, lastPressTick;
 let bufferedJump, bufferedCharge, squashT;
 let trauma, shakePhase, shakeX, shakeY;
-let stretchT, dust, trail, inStep;
+let stretchT, dust, trail, inStep, wxBannerT;
 let countN, countT, countElapsed, lastCountdownS;
 let ignoreHoldUntilRelease, hapticLog;
 let lastTs = 0, acc = 0;
@@ -1263,6 +1361,7 @@ function reset() {
   bufferedCharge = 0;
   squashT = 0;
   stretchT = 0;
+  wxBannerT = 0;
   dust = [];
   trail = [];
   trauma = 0;
@@ -1279,6 +1378,7 @@ function reset() {
   st = 'ready';
   updateCam();
   ensurePlats();
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
 }
 
 function startCountdown() {
@@ -1292,6 +1392,8 @@ function startCountdown() {
   if (secs <= 0) {
     st = 'play';
     lastCountdownS = 0;
+    wxBannerT = 1.8;
+    if (typeof syncSceneChrome === 'function') syncSceneChrome();
     return;
   }
   st = 'countdown';
@@ -1299,6 +1401,8 @@ function startCountdown() {
   countT = 0;
   countElapsed = 0;
   lastCountdownS = 0;
+  wxBannerT = 1.8;
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
   haptic('count');
 }
 
@@ -1311,7 +1415,9 @@ function finishCountdown() {
   charge = 0;
   bufferedJump = false;
   lastPressTick = NEVER;
+  if (wxBannerT < 1.8) wxBannerT = 1.8;
   if (isHeld()) ignoreHoldUntilRelease = true;
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
 }
 
 function pickKind(progress) {
@@ -1417,29 +1523,48 @@ function endPress() {
   }
   if (st === 'play' && charging) releaseJump();
 }
-function spawnJumpDust() {
-  const n = CFG.JUMP_DUST;
+function dustColor() {
+  const pal = weather ? weather.palette : 'earth';
+  if (pal === 'moon') return '#c8c2b4';
+  if (pal === 'mars') return '#d4925a';
+  if (pal === 'snow' || pal === 'ice') return '#e8eef4';
+  return '#e8d7a4';
+}
+function spawnDustBurst(kind) {
+  const pal = weather ? weather.palette : 'earth';
+  const land = kind === 'land';
+  // 月球落地揚塵較明顯；真空沿拋物線落下，不隨風飄
+  const n = pal === 'moon' ? (land ? 12 : 8) : pal === 'mars' ? (land ? 8 : 6) : (land ? 0 : CFG.JUMP_DUST);
+  if (!n) return;
+  if (dust.length + n > 28) dust.splice(0, dust.length + n - 28);
   const feetY = chick.y + CFG.CHICKEN_R;
+  const gMul = weather && weather.gMul != null ? weather.gMul : 1;
+  const gDust = pal === 'moon' || pal === 'mars' ? CFG.GRAVITY * gMul : 900;
   for (let i = 0; i < n; i++) {
     const k = i - (n - 1) / 2;
     dust.push({
-      x: chick.x + k * 5,
+      x: chick.x + k * 4.2,
       y: feetY,
-      vx: k * 55,
-      vy: -70 - Math.abs(k) * 12,
-      life: 0.26 + Math.abs(k) * 0.02,
-      t: 0
+      vx: k * (pal === 'moon' ? 38 : 55), // 無空氣：只保留初速，不另加風
+      vy: -(land ? 110 : 70) - Math.abs(k) * (land ? 16 : 12),
+      life: (pal === 'moon' ? 0.7 : 0.28) + Math.abs(k) * 0.03,
+      t: 0,
+      g: gDust,
+      r: pal === 'moon' ? 1.6 + Math.abs(k) * 0.15 : 2.2
     });
   }
 }
+function spawnJumpDust() { spawnDustBurst('jump'); }
+function spawnLandDust() { spawnDustBurst('land'); }
 function updateFx(dt) {
   if (stretchT > 0) stretchT = Math.max(0, stretchT - dt);
+  if (st === 'play' && wxBannerT > 0) wxBannerT = Math.max(0, wxBannerT - dt);
   for (let i = 0; i < dust.length; i++) {
     const d = dust[i];
     d.t += dt;
     d.x += d.vx * dt;
     d.y += d.vy * dt;
-    d.vy += 900 * dt;
+    d.vy += (d.g != null ? d.g : 900) * dt;
   }
   dust = dust.filter(d => d.t < d.life);
   if (!grounded && chick.vy < 0) {
@@ -1493,6 +1618,7 @@ function landOn(p) {
     lastJump.peak = Math.max(lastJump.peak, lastJump.startY - chick.y);
     lastJump.airborne = false;
     squashT = CFG.LAND_SQUASH;
+    spawnLandDust();
   }
   if (p.id !== onPlatId && p.id > lastScoredId) {
     score += 1;
@@ -1523,6 +1649,7 @@ function die() {
   charge = 0;
   st = 'over';
   tOver = 0;
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
   haptic('hit');
   if (score > best) {
     best = score;
@@ -1666,13 +1793,14 @@ function drawTrail() {
   }
 }
 function drawDust() {
+  const col = dustColor();
   for (let i = 0; i < dust.length; i++) {
     const d = dust[i];
     const u = 1 - d.t / d.life;
-    ctx.globalAlpha = 0.55 * u;
-    ctx.fillStyle = '#e8d7a4';
+    ctx.globalAlpha = 0.6 * u;
+    ctx.fillStyle = col;
     ctx.beginPath();
-    ctx.arc(d.x, d.y, 2.4 + 2.2 * u, 0, Math.PI * 2);
+    ctx.arc(d.x, d.y, (d.r || 2.4) + 2.0 * u, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   }
@@ -1781,6 +1909,125 @@ function drawChargeBar() {
   ctx.restore();
 }
 
+function sceneBg() {
+  const pal = weather ? weather.palette : 'earth';
+  if (pal === 'moon') return '#070b18';
+  if (pal === 'mars') return '#c86a3a';
+  if (pal === 'storm') return '#5a6876';
+  if (pal === 'snow' || pal === 'ice') return '#e4eef6';
+  if (pal === 'hot') return '#e8d090';
+  if (typeof isDarkSky === 'function' && isDarkSky()) return '#101828';
+  return '#9ad8f5';
+}
+function syncSceneChrome() {
+  const bg = sceneBg();
+  const dark = (weather && weather.palette === 'moon') || (typeof isDarkSky === 'function' && isDarkSky());
+  const root = document.documentElement;
+  if (document.body) document.body.style.background = bg;
+  const wrap = document.getElementById('wrap');
+  if (wrap) wrap.style.background = bg;
+  if (canvas) canvas.style.background = bg;
+  const bar = document.getElementById('placeBar');
+  if (bar) {
+    bar.classList.toggle('dark', !!dark);
+    const ready = typeof st === 'string' && st === 'ready';
+    bar.classList.toggle('visible', ready);
+    const dateEl = document.getElementById('placeDate');
+    if (dateEl) dateEl.textContent = placeLine();
+    const msgEl = document.getElementById('placeMsg');
+    if (msgEl) msgEl.textContent = locState.msg || '';
+    const btn = document.getElementById('locBtn');
+    if (btn) {
+      btn.disabled = locState.status === 'asking';
+      if (locState.fromGeo && locState.status === 'ok') btn.textContent = '已顯示：' + locState.label;
+      else if (locState.status === 'asking') btn.textContent = '定位中…';
+      else btn.textContent = '顯示我的位置';
+    }
+  }
+}
+function cityFromGeo(j) {
+  if (!j || typeof j !== 'object') return '';
+  return j.city || j.locality || j.localityInfo && j.localityInfo.administrative && j.localityInfo.administrative[0] && j.localityInfo.administrative[0].name || j.principalSubdivision || j.countryName || '';
+}
+function reverseGeocode(lat, lon) {
+  const url = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' +
+    encodeURIComponent(lat) + '&longitude=' + encodeURIComponent(lon) + '&localityLanguage=zh-Hant';
+  return fetch(url).then(function (res) {
+    if (!res.ok) throw new Error('geocode');
+    return res.json();
+  }).then(function (j) {
+    const name = cityFromGeo(j);
+    if (!name) throw new Error('empty');
+    return name;
+  }).catch(function () {
+    const url2 = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=' +
+      encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon) + '&accept-language=zh-TW';
+    return fetch(url2, { headers: { 'Accept': 'application/json' } }).then(function (res) {
+      if (!res.ok) throw new Error('geocode2');
+      return res.json();
+    }).then(function (j) {
+      const a = j && j.address || {};
+      const name = a.city || a.town || a.village || a.suburb || a.county || a.state || (j && j.name) || '';
+      if (!name) throw new Error('empty2');
+      return name;
+    });
+  });
+}
+function requestPlace() {
+  if (!navigator.geolocation) {
+    locState.status = 'unsupported';
+    locState.fromGeo = false;
+    locState.label = tzPlaceName(DEVICE_TZ);
+    locState.msg = '此環境無法定位，已用時區顯示地區';
+    syncSceneChrome();
+    return;
+  }
+  locState.status = 'asking';
+  locState.msg = '定位中…';
+  syncSceneChrome();
+  let settled = false;
+  const finish = function (fn) { if (settled) return; settled = true; fn(); };
+  try {
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      const lat = pos && pos.coords && pos.coords.latitude;
+      const lon = pos && pos.coords && pos.coords.longitude;
+      reverseGeocode(lat, lon).then(function (name) {
+        finish(function () {
+          locState.status = 'ok';
+          locState.fromGeo = true;
+          locState.label = name;
+          locState.msg = '';
+          syncSceneChrome();
+        });
+      }).catch(function () {
+        finish(function () {
+          locState.status = 'error';
+          locState.fromGeo = false;
+          locState.label = tzPlaceName(DEVICE_TZ);
+          locState.msg = '找不到城市名稱，已用時區顯示地區';
+          syncSceneChrome();
+        });
+      });
+    }, function (err) {
+      finish(function () {
+        locState.status = (err && err.code === 1) ? 'denied' : 'error';
+        locState.fromGeo = false;
+        locState.label = tzPlaceName(DEVICE_TZ);
+        locState.msg = locState.status === 'denied'
+          ? '未授權定位，已用時區顯示地區'
+          : '無法取得位置，已用時區顯示地區';
+        syncSceneChrome();
+      });
+    }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 0 });
+  } catch (e) {
+    locState.status = 'unsupported';
+    locState.fromGeo = false;
+    locState.label = tzPlaceName(DEVICE_TZ);
+    locState.msg = '此環境無法定位，已用時區顯示地區';
+    syncSceneChrome();
+  }
+}
+
 function wrapLines(text, maxW) {
   const chars = String(text || '');
   const lines = [];
@@ -1812,6 +2059,280 @@ function drawHills(period, yFoot, color, ridges, parallax, cx, width) {
   ctx.fill();
 }
 
+function drawHillSnowCaps(period, ridges, parallax, cx, width) {
+  const shift = -((cx * parallax) % period + period) % period;
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  const copies = Math.ceil((width - (shift - period)) / period) + 2;
+  for (let k = 0; k < copies; k++) {
+    const ox = shift + (k - 1) * period;
+    for (let i = 1; i < ridges.length - 1; i++) {
+      const x = ox + ridges[i][0], y = ridges[i][1];
+      const prev = ridges[i - 1], next = ridges[i + 1];
+      if (y >= prev[1] - 2 && y >= next[1] - 2) continue; // 非峰
+      ctx.beginPath();
+      ctx.moveTo(ox + prev[0] + (ridges[i][0] - prev[0]) * 0.45, prev[1] + (y - prev[1]) * 0.45);
+      ctx.lineTo(x, y + 1);
+      ctx.lineTo(ox + next[0] + (ridges[i][0] - next[0]) * 0.45, next[1] + (y - next[1]) * 0.45);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+function drawDunes(period, yFoot, color, amp, parallax, cx, width) {
+  const shift = -((cx * parallax) % period + period) % period;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  const start = shift - period;
+  ctx.moveTo(start, yFoot);
+  const copies = Math.ceil((width - start) / period) + 2;
+  for (let k = 0; k < copies; k++) {
+    const ox = shift + (k - 1) * period;
+    ctx.lineTo(ox, yFoot - amp * 0.25);
+    ctx.quadraticCurveTo(ox + period * 0.25, yFoot - amp, ox + period * 0.5, yFoot - amp * 0.4);
+    ctx.quadraticCurveTo(ox + period * 0.72, yFoot - amp * 0.15, ox + period, yFoot - amp * 0.5);
+  }
+  ctx.lineTo(start + copies * period, yFoot);
+  ctx.lineTo(start, yFoot);
+  ctx.closePath();
+  ctx.fill();
+}
+function drawCraters(W, y0, h, cx, par, pal) {
+  const period = 440;
+  const shift = -((cx * par) % period + period) % period;
+  const copies = Math.ceil(W / period) + 3;
+  for (let k = -1; k < copies; k++) {
+    const tile = Math.floor((cx * par) / period) + k;
+    const ox = shift + k * period;
+    const r = mulberry32(seedHash((tile * 997) ^ 0xC2A7E ^ (pal === 'moon' ? 11 : 23)));
+    const n = pal === 'moon' ? 4 : 3;
+    for (let i = 0; i < n; i++) {
+      const x = ox + 30 + r() * (period - 60);
+      const y = y0 + 16 + r() * (h - 28);
+      const rw = 10 + r() * 28;
+      const rh = rw * (0.35 + r() * 0.25);
+      ctx.beginPath();
+      ctx.ellipse(x, y, rw, rh, 0, 0, Math.PI * 2);
+      ctx.fillStyle = pal === 'moon' ? 'rgba(40,44,52,' + (0.22 + r() * 0.25) + ')' : 'rgba(80,28,12,' + (0.2 + r() * 0.2) + ')';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(x - rw * 0.15, y - rh * 0.2, rw * 0.55, rh * 0.45, 0, 0, Math.PI * 2);
+      ctx.fillStyle = pal === 'moon' ? 'rgba(180,184,192,0.12)' : 'rgba(220,140,90,0.12)';
+      ctx.fill();
+    }
+  }
+}
+function drawMoonTerrain(W, H, cx) {
+  // 低矮月岩稜線，不是山林
+  drawHills(520, 650, '#3a3f4a',
+    [[0, 630], [90, 600], [180, 622], [280, 588], [390, 618], [520, 602]],
+    0.08, cx, W);
+  drawHills(520, 668, '#2e333c',
+    [[0, 648], [120, 622], [240, 650], [360, 614], [520, 640]],
+    0.16, cx, W);
+  const abyss = ctx.createLinearGradient(0, 650, 0, H);
+  const ab = abyssStops();
+  for (let i = 0; i < ab.length; i++) abyss.addColorStop(ab[i][0], ab[i][1]);
+  ctx.fillStyle = abyss;
+  ctx.fillRect(0, 650, W, H - 650);
+  drawCraters(W, 658, H - 658, cx, 0.35, 'moon');
+}
+function drawMarsTerrain(W, H, cx) {
+  drawDunes(460, 640, '#b85a30', 110, 0.10, cx, W);
+  drawDunes(380, 655, '#8a3a1c', 70, 0.18, cx, W);
+  const abyss = ctx.createLinearGradient(0, 650, 0, H);
+  const ab = abyssStops();
+  for (let i = 0; i < ab.length; i++) abyss.addColorStop(ab[i][0], ab[i][1]);
+  ctx.fillStyle = abyss;
+  ctx.fillRect(0, 650, W, H - 650);
+  drawCraters(W, 658, H - 658, cx, 0.28, 'mars');
+}
+function drawEarthTerrain(W, H, cx) {
+  const pal = weather ? weather.palette : 'earth';
+  const hc = hillColors();
+  const far = [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]];
+  const near = [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]];
+  drawHills(390, 620, hc[0], far, 0.12, cx, W);
+  if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, far, 0.12, cx, W);
+  drawHills(390, 640, hc[1], near, 0.2, cx, W);
+  if (pal === 'snow' || pal === 'ice') drawHillSnowCaps(390, near, 0.2, cx, W);
+  const abyss = ctx.createLinearGradient(0, 660, 0, H);
+  const ab = abyssStops();
+  for (let i = 0; i < ab.length; i++) abyss.addColorStop(ab[i][0], ab[i][1]);
+  ctx.fillStyle = abyss;
+  ctx.fillRect(0, 660, W, H - 660);
+}
+function drawTerrain(W, H, cx) {
+  const pal = weather ? weather.palette : 'earth';
+  if (pal === 'moon') drawMoonTerrain(W, H, cx);
+  else if (pal === 'mars') drawMarsTerrain(W, H, cx);
+  else drawEarthTerrain(W, H, cx);
+}
+function platColors() {
+  const pal = weather ? weather.palette : 'earth';
+  if (pal === 'moon') return { body: '#6a6f7a', top: '#c5c8ce', edge: '#2a2c32', accent: '#8b909a' };
+  if (pal === 'mars') return { body: '#7a3218', top: '#c4562c', edge: '#3a140c', accent: '#a04422' };
+  if (pal === 'ice') return { body: '#6a7c8c', top: '#eaf4ff', edge: '#2a3a48', accent: '#cfe4f2' };
+  if (pal === 'snow') return { body: '#6a5340', top: '#f4f8fb', edge: '#2c2420', accent: '#dce8de' };
+  if (pal === 'hot') return { body: '#8a5a2b', top: '#c8a24a', edge: '#3a2410', accent: '#d8b45a' };
+  if (pal === 'rain' || pal === 'storm') return { body: '#6a4a28', top: '#4e8a3e', edge: '#243018', accent: '#6aa852' };
+  return { body: '#8b5a2b', top: '#7cc35b', edge: '#2a3a18', accent: '#67b049' };
+}
+function drawPlatform(p) {
+  const pal = weather ? weather.palette : 'earth';
+  const c = platColors();
+  const th = CFG.PLAT_THICK;
+  // 影子
+  ctx.fillStyle = pal === 'moon' ? 'rgba(0,0,0,.35)' : pal === 'mars' ? 'rgba(40,10,0,.28)' : 'rgba(40,70,30,.22)';
+  ctx.fillRect(p.x + 4, p.y + th, p.w - 4, 8);
+  ctx.fillStyle = c.body;
+  roundRect(p.x, p.y, p.w, th + 10, 6);
+  ctx.fill();
+  ctx.fillStyle = c.top;
+  roundRect(p.x, p.y, p.w, pal === 'snow' ? 16 : 12, 6);
+  ctx.fill();
+  ctx.fillRect(p.x, p.y + 6, p.w, pal === 'snow' ? 10 : 8);
+  if (pal === 'moon') {
+    const r = mulberry32(seedHash((p.id || 1) * 7919));
+    const n = 1 + ((p.w / 70) | 0);
+    for (let i = 0; i < n; i++) {
+      const cxp = p.x + 12 + r() * Math.max(8, p.w - 24);
+      const cy = p.y + 5 + r() * 10;
+      ctx.beginPath();
+      ctx.ellipse(cxp, cy, 4 + r() * 6, 2 + r() * 2.5, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40,44,52,0.35)';
+      ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(p.x + 5, p.y + 2, Math.max(18, p.w * 0.3), 1.4);
+  } else if (pal === 'mars') {
+    ctx.fillStyle = 'rgba(60,16,8,0.28)';
+    ctx.fillRect(p.x + 8, p.y + 7, p.w * 0.36, 2);
+    ctx.fillRect(p.x + p.w * 0.5, p.y + 11, p.w * 0.28, 1.6);
+  } else if (pal === 'ice') {
+    const ig = ctx.createLinearGradient(p.x, p.y, p.x, p.y + 14);
+    ig.addColorStop(0, 'rgba(255,255,255,0.92)');
+    ig.addColorStop(0.4, 'rgba(220,236,248,0.75)');
+    ig.addColorStop(1, 'rgba(170,200,220,0.18)');
+    ctx.fillStyle = ig;
+    ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, 11);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(p.x + 6, p.y + 2, Math.max(16, p.w * 0.38), 1.6);
+  } else if (pal === 'snow') {
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath();
+    ctx.moveTo(p.x + 2, p.y + 8);
+    for (let x = p.x; x <= p.x + p.w; x += 10) {
+      ctx.lineTo(x, p.y - 3 - Math.abs(Math.sin(x * 0.2 + p.id)) * 3);
+    }
+    ctx.lineTo(p.x + p.w - 2, p.y + 8);
+    ctx.closePath();
+    ctx.fill();
+  } else if (pal === 'rain' || pal === 'storm') {
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.fillRect(p.x + 3, p.y + 2, p.w * 0.4, 1.4);
+  }
+  // 草尖：月岩／火星／冰面不畫綠草，積雪改畫稀疏霜針
+  if (pal !== 'moon' && pal !== 'mars' && pal !== 'ice' && pal !== 'snow') {
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    const step = pal === 'hot' ? 14 : 8;
+    for (let gx = p.x + 6; gx < p.x + p.w - 4; gx += step) {
+      ctx.moveTo(gx, p.y + 3);
+      ctx.lineTo(gx + 2, p.y - (pal === 'hot' ? 2 : 4));
+    }
+    ctx.stroke();
+  } else if (pal === 'snow') {
+    ctx.strokeStyle = '#d8e6f0';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    for (let gx = p.x + 8; gx < p.x + p.w - 6; gx += 11) {
+      ctx.moveTo(gx, p.y + 1);
+      ctx.lineTo(gx + 1, p.y - 5);
+    }
+    ctx.stroke();
+  }
+  // 深色描邊，讓雞與台緣清楚
+  ctx.strokeStyle = c.edge;
+  ctx.lineWidth = 1.8;
+  roundRect(p.x, p.y, p.w, th + 10, 6);
+  ctx.stroke();
+}
+function roundRectBadge(x, y, w, h, r) {
+  roundRect(x, y, w, h, r);
+}
+function drawWeatherBadge(W, y, env) {
+  const wth = weather;
+  if (!wth) return y;
+  const dark = isDarkSky() || wth.palette === 'moon' || wth.palette === 'storm';
+  const title = wth.emoji + '　' + wth.title;
+  const feel = weatherFeel(wth);
+  const windMs = env ? env.windMs : 0;
+  const showWind = Math.abs(windMs) >= 0.4;
+  // 風改走箭頭列，副標只留重力／手感，避免重複
+  const det = (wth.id === 'moon' || wth.id === 'mars') ? ('重力 ' + wth.gMul.toFixed(2) + 'g')
+    : (wth.id === 'hot') ? ('空氣密度 ' + (wth.rho / CFG.RHO0).toFixed(2) + ' ρ₀')
+    : (wth.id === 'ice') ? '路面結冰'
+    : (wth.id === 'clear') ? '地球重力' : '';
+  const sub = [det, feel].filter(Boolean).join(' · ');
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px sans-serif';
+  const tw = Math.max(ctx.measureText(title).width, sub ? (ctx.font = '15px sans-serif', ctx.measureText(sub).width) : 0);
+  ctx.font = 'bold 20px sans-serif';
+  const bw = Math.min(W - 32, Math.max(200, tw + 36));
+  const bh = 52 + (showWind ? 28 : 0);
+  const bx = (W - bw) / 2;
+  ctx.fillStyle = dark ? 'rgba(8,12,18,0.72)' : 'rgba(255,255,255,0.9)';
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.22)' : 'rgba(20,40,50,0.18)';
+  ctx.lineWidth = 1.2;
+  roundRect(bx, y, bw, bh, 14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = dark ? '#f4f7fb' : '#1d2a33';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText(title, W / 2, y + 24);
+  if (sub) {
+    ctx.font = '15px sans-serif';
+    ctx.fillStyle = dark ? 'rgba(236,242,248,0.9)' : '#3a4a55';
+    ctx.fillText(sub, W / 2, y + 44);
+  }
+  if (showWind) {
+    const ww = windWords(windMs);
+    const arr = windArrow(windMs);
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = dark ? '#ffe08a' : '#0b4a8a';
+    ctx.fillText(arr + '  ' + ww, W / 2, y + 70);
+  }
+  ctx.restore();
+  return y + bh + 8;
+}
+function drawWxBanner(W, H, env, alpha) {
+  if (alpha <= 0.02) return;
+  const text = weatherHeadline(weather, env);
+  if (!text) return;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 28px sans-serif';
+  const maxW = Math.min(W - 36, 360);
+  // 過長就略縮字
+  let size = 28;
+  while (size > 18 && ctx.measureText(text).width > maxW) {
+    size -= 1;
+    ctx.font = 'bold ' + size + 'px sans-serif';
+  }
+  const tw = Math.min(maxW, ctx.measureText(text).width + 36);
+  const x = (W - tw) / 2;
+  const y = H * 0.20;
+  ctx.fillStyle = 'rgba(8,12,18,0.78)';
+  roundRect(x, y, tw, 52, 16);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(text, W / 2, y + 34);
+  ctx.restore();
+}
+
 function draw() {
   const W = viewW, H = viewH;
   const pad = safePad();
@@ -1828,18 +2349,7 @@ function draw() {
   drawSunOrMoon(W, H);
   const cx = camX - viewPadX;
   drawSoftClouds(W, H, cx);
-  const hc = hillColors();
-  drawHills(390, 620, hc[0],
-    [[0, 520], [80, 430], [160, 500], [250, 400], [340, 490], [390, 450]],
-    0.12, cx, W);
-  drawHills(390, 640, hc[1],
-    [[0, 580], [120, 500], [220, 570], [310, 490], [390, 560]],
-    0.2, cx, W);
-  const abyss = ctx.createLinearGradient(0, 660, 0, H);
-  const ab = abyssStops();
-  for (let i = 0; i < ab.length; i++) abyss.addColorStop(ab[i][0], ab[i][1]);
-  ctx.fillStyle = abyss;
-  ctx.fillRect(0, 660, W, H - 660);
+  drawTerrain(W, H, cx);
   drawPrecip(W, H, 0);
 
   ctx.save();
@@ -1847,41 +2357,7 @@ function draw() {
 
   for (const p of plats) {
     if (p.x + p.w < camX - 40 || p.x > camX + camW + 40) continue;
-    // 影子
-    ctx.fillStyle = 'rgba(40,70,30,.22)';
-    ctx.fillRect(p.x + 4, p.y + CFG.PLAT_THICK, p.w - 4, 8);
-    // 土（月表／火星／結冰會換色）
-    const palP = weather ? weather.palette : 'earth';
-    ctx.fillStyle = palP === 'moon' ? '#8a8f9a' : palP === 'mars' ? '#8a4a28' : palP === 'ice' ? '#7a8a96' : '#8b5a2b';
-    roundRect(p.x, p.y, p.w, CFG.PLAT_THICK + 10, 6);
-    ctx.fill();
-    // 草皮或冰面
-    ctx.fillStyle = palP === 'moon' ? '#b0b6c0' : palP === 'mars' ? '#c46a3a' : palP === 'ice' ? '#e8f4ff' : palP === 'snow' ? '#dce8de' : palP === 'rain' || palP === 'storm' ? '#5ea34a' : '#7cc35b';
-    roundRect(p.x, p.y, p.w, 12, 6);
-    ctx.fill();
-    ctx.fillRect(p.x, p.y + 6, p.w, 8);
-    if (palP === 'ice') {
-      const ig = ctx.createLinearGradient(p.x, p.y, p.x, p.y + 14);
-      ig.addColorStop(0, 'rgba(255,255,255,0.9)');
-      ig.addColorStop(0.4, 'rgba(220,236,248,0.7)');
-      ig.addColorStop(1, 'rgba(170,200,220,0.15)');
-      ctx.fillStyle = ig;
-      ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, 11);
-      ctx.fillStyle = 'rgba(255,255,255,0.55)';
-      ctx.fillRect(p.x + 6, p.y + 2, Math.max(16, p.w * 0.38), 1.6);
-    } else if (palP === 'rain' || palP === 'storm') {
-      ctx.fillStyle = 'rgba(255,255,255,0.18)';
-      ctx.fillRect(p.x + 3, p.y + 2, p.w * 0.4, 1.4);
-    }
-    // 草尖
-    ctx.strokeStyle = palP === 'ice' || palP === 'snow' ? '#cfe4f2' : palP === 'moon' ? '#9aa0aa' : '#67b049';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    for (let gx = p.x + 6; gx < p.x + p.w - 4; gx += 8) {
-      ctx.moveTo(gx, p.y + 3);
-      ctx.lineTo(gx + 2, p.y - 4);
-    }
-    ctx.stroke();
+    drawPlatform(p);
   }
 
   drawTrail();
@@ -1892,57 +2368,73 @@ function draw() {
 
   drawWx(W, H);
 
-  // HUD：避開安全區
+  // HUD：避開安全區；天氣用大徽章，日期依裝置時區／位置
   const hudInk = isDarkSky() ? 'rgba(240,244,250,.9)' : 'rgba(20,40,50,.82)';
   const hudInk2 = isDarkSky() ? 'rgba(220,228,236,.75)' : 'rgba(20,40,50,.72)';
   const envHud = envAt(chick.x);
-  const wxHud = weatherLines(weather, envHud);
   const hudY = Math.max(86, pad.t + 62);
   ctx.textAlign = 'center';
   ctx.fillStyle = hudInk;
   ctx.font = 'bold 56px sans-serif';
   ctx.fillText(String(score), W / 2, hudY);
+  const meta = '今日最佳 ' + best + '　' + placeLine();
   ctx.font = '13px sans-serif';
+  const metaW = Math.min(W - 24, ctx.measureText(meta).width + 20);
+  if (isDarkSky() || (weather && weather.palette === 'moon')) {
+    ctx.fillStyle = 'rgba(8,12,18,0.55)';
+    roundRect((W - metaW) / 2, hudY + 10, metaW, 22, 10);
+    ctx.fill();
+  }
   ctx.fillStyle = hudInk2;
-  ctx.fillText('今日最佳 ' + best + '　台北 ' + taipeiDateLabel(SEED0), W / 2, hudY + 26);
-  ctx.font = '12px sans-serif';
-  ctx.fillText('白雞跳跳 v0.2', W / 2, hudY + 46);
-  ctx.font = '13px sans-serif';
-  ctx.fillStyle = hudInk;
-  for (let i = 0; i < wxHud.length; i++) ctx.fillText(wxHud[i], W / 2, hudY + 66 + i * 16);
+  ctx.fillText(meta, W / 2, hudY + 26);
+  ctx.font = '11px sans-serif';
+  ctx.fillText('白雞跳跳 v0.2', W / 2, hudY + 44);
+  // 倒數／開場橫幅顯示時先不疊徽章，橫幅淡出後再留徽章
+  const showBanner = st === 'countdown' || (st === 'play' && wxBannerT > 0);
+  if (st !== 'ready' && !(st === 'play' && wxBannerT > 0.3) && st !== 'countdown') {
+    drawWeatherBadge(W, hudY + 54, envHud);
+  }
+  if (showBanner) {
+    const a = st === 'countdown' ? 1 : Math.min(1, wxBannerT / 0.45);
+    drawWxBanner(W, H, envHud, a);
+  }
 
   const cardW = Math.min(CFG.W - 56, W - 56 - pad.l - pad.r);
   const cardX = (W - cardW) / 2;
 
   if (st === 'ready') {
     const hintLines = wrapLines(hintEl.textContent || '', cardW - 40);
-    const wxLines = wxHud;
-    const cardH = 168 + hintLines.length * 16 + wxLines.length * 18;
-    const cardY = Math.min(H * 0.54, H - cardH - 24 - pad.b);
-    ctx.fillStyle = 'rgba(255,255,255,.86)';
+    const head = weatherHeadline(weather, envHud);
+    const cardH = 178 + hintLines.length * 16;
+    const reserve = 136 + pad.b;
+    const cardY = Math.min(H * 0.40, H - cardH - reserve);
+    ctx.fillStyle = 'rgba(255,255,255,.92)';
     roundRect(cardX, cardY, cardW, cardH, 16);
     ctx.fill();
     ctx.fillStyle = '#1d2a33';
-    ctx.font = 'bold 18px sans-serif';
-    let cy = cardY + 28;
-    for (let i = 0; i < wxLines.length; i++) {
-      ctx.fillText(wxLines[i], W / 2, cy);
-      cy += 20;
+    ctx.font = 'bold 26px sans-serif';
+    let size = 26;
+    while (size > 17 && ctx.measureText(head).width > cardW - 28) {
+      size -= 1;
+      ctx.font = 'bold ' + size + 'px sans-serif';
     }
-    cy += 6;
-    ctx.font = 'bold 22px sans-serif';
+    let cy = cardY + 36;
+    ctx.fillText(head, W / 2, cy);
+    cy += 28;
+    ctx.fillStyle = '#1d2a33';
+    ctx.font = 'bold 20px sans-serif';
     ctx.fillText('按住蓄力，放開起跳', W / 2, cy);
-    cy += 32;
+    cy += 28;
     ctx.font = '15px sans-serif';
     ctx.fillStyle = '#3a4a55';
     ctx.fillText('輕點是小跳，按越久跳越遠、越高', W / 2, cy);
-    cy += 24;
+    cy += 22;
     ctx.fillText('跑到缺口前放開；短跳過近台，長跳過遠台', W / 2, cy);
     cy += 24;
     ctx.font = '13px sans-serif';
     ctx.fillStyle = '#5a6a75';
     ctx.fillText('點擊／空白鍵開始', W / 2, cy);
-    cy += 22;
+    cy += 20;
     ctx.font = '11px sans-serif';
     ctx.fillStyle = '#6a7a85';
     for (let i = 0; i < hintLines.length; i++) {
@@ -2038,7 +2530,7 @@ function loop(ts) {
 let pointerId = null;
 let keyHeld = false;
 function onPointerDown(ev) {
-  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn')) return;
+  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn, #placeBar, #locBtn')) return;
   ev.preventDefault();
   if (pointerId !== null) return;
   pointerId = ev.pointerId;
@@ -2080,6 +2572,15 @@ vibBtn.addEventListener('click', ev => {
   setVibrate(!vibrateOn);
 });
 vibBtn.addEventListener('pointerdown', ev => ev.stopPropagation());
+const locBtn = document.getElementById('locBtn');
+if (locBtn) {
+  locBtn.addEventListener('click', ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    requestPlace();
+  });
+  locBtn.addEventListener('pointerdown', ev => ev.stopPropagation());
+}
 
 // 供 headless 驗證使用
 window.__BAIJI__ = {
@@ -2095,6 +2596,12 @@ window.__BAIJI__ = {
       platCount: plats.length,
       onPlatId, lastScoredId,
       taipeiLabel: taipeiDateLabel(SEED0),
+      deviceTz: DEVICE_TZ,
+      deviceDate: deviceDateLabel(),
+      placeLabel: locState.label,
+      placeFromGeo: locState.fromGeo,
+      placeStatus: locState.status,
+      headline: weather ? weatherHeadline(weather, envAt(chick.x)) : '',
       tick, coyoteLeft: Math.max(0, COYOTE_TICKS - (tick - lastGroundTick)),
       trauma,
       countN, countT, countElapsed, lastCountdownS,
@@ -2107,7 +2614,9 @@ window.__BAIJI__ = {
         precip: weather.precip, windBaseMs: weather.windBaseMs,
         gustAmpMs: weather.gustAmpMs, palette: weather.palette,
         segments: (weather.segments || []).map(s => ({ fromX: s.fromX, windMs: s.windMs })),
-        lines: weatherLines(weather, envAt(chick.x))
+        lines: weatherLines(weather, envAt(chick.x)),
+        headline: weatherHeadline(weather, envAt(chick.x)),
+        feel: weatherFeel(weather)
       } : null,
       env: envAt(chick.x),
       fx: {
@@ -2202,7 +2711,9 @@ window.__BAIJI__ = {
   plats() { return plats.map(p => ({ id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || 'start' })); },
   reset,
   die,
-  setVibrate
+  setVibrate,
+  requestPlace,
+  placeLine
 };
 
 function onViewportChange() {
@@ -2219,6 +2730,7 @@ syncVibUi();
 layout();
 initWeather(SEED0);
 reset();
+syncSceneChrome();
 requestAnimationFrame(loop);
 </script>
 </body>
