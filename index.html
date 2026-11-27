@@ -57,6 +57,31 @@
     top:env(safe-area-inset-top,0px);left:env(safe-area-inset-left,0px);
     right:env(safe-area-inset-right,0px);bottom:env(safe-area-inset-bottom,0px);
   }
+  #adContinueBtn{
+    display:none;position:fixed;z-index:8;left:50%;transform:translateX(-50%);
+    bottom:calc(16px + env(safe-area-inset-bottom,0px));
+    border:0;border-radius:18px;padding:12px 18px;font-size:15px;line-height:1.3;
+    font-family:inherit;background:#1d2a33;color:#fff;
+    box-shadow:0 2px 8px rgba(0,0,0,.25);
+    touch-action:manipulation;-webkit-user-select:none;user-select:none;
+    max-width:calc(100% - 32px);
+  }
+  #adContinueBtn.visible{display:block;}
+  #adFake{
+    display:none;position:fixed;inset:0;z-index:30;
+    background:rgba(10,14,20,.94);color:#f4f7fa;
+    flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    padding:24px;text-align:center;font-family:inherit;
+  }
+  #adFake.visible{display:flex;}
+  #adFake .adFakeTitle{font-size:22px;font-weight:700;}
+  #adFake .adFakeNote{font-size:14px;line-height:1.5;max-width:320px;color:#c9d3db;}
+  #adFake .adFakeActions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;}
+  #adFake button{
+    border:0;border-radius:16px;padding:10px 16px;font-size:15px;font-family:inherit;
+    background:#fff;color:#1d2a33;touch-action:manipulation;
+  }
+  #adFake button.secondary{background:rgba(255,255,255,.16);color:#fff;}
 </style>
 </head>
 <body>
@@ -71,6 +96,16 @@
 </div>
 <div id="hint"></div>
 <div id="safeProbe" aria-hidden="true"></div>
+<button type="button" id="adContinueBtn">看廣告接續目前分數</button>
+<div id="adFake" aria-live="polite">
+  <div class="adFakeTitle" id="adFakeTitle">測試廣告</div>
+  <div class="adFakeNote" id="adFakeNote"></div>
+  <div class="adFakeActions">
+    <button type="button" id="adFakeView">看完</button>
+    <button type="button" id="adFakeSkip" class="secondary">略過</button>
+    <button type="button" id="adFakeClose">關閉</button>
+  </div>
+</div>
 <script>
 /* ============================================================
    白雞跳跳 v0.2  — 難度與手感參數（調這裡即可）
@@ -154,6 +189,12 @@ const CFG = {
   LAND_INSET_PAD: 48,         // 預留落地落點到台端的內縮
   TAKEOFF_PAD: 8,             // 台緣起跳餘裕（與模擬一致）
   HUMAN_CHARGE_ERR_S: 0.08,   // 人類蓄力時間誤差 ± 秒（檢查用）
+  // ---- 廣告（Ad Placement API / AdSense H5；尚無正式帳號時不要填 publisher id）----
+  ADS_ENABLED: false,         // 正式投放前保持關閉；可用 ?ads=1 或 ?fakead=1 測試
+  ADS_TEST_MODE: true,        // 有正式 AdSense 並通過審核後改 false，並拿掉 data-adbreak-test
+  ADS_CLIENT: '',             // 日後填入 'ca-pub-xxxxxxxxxxxxxxxx'，不要預填真實或假的 id
+  ADS_INTERSTITIAL_EVERY: 3,  // 每完成 N 局、下一次倒數前插一次 interstitial（type: next）
+  ADS_FAKE_MS: 1400,          // ?fakead=1 模擬廣告的最短顯示毫秒
   // ---- 天氣視覺（質感對齊 iPhone 天氣 App／動態桌布；不影響物理與公平性）----
   FX_QUALITY: 'auto',     // auto | high | medium | low；也可 ?fx=low
   FX_MAX_DPR_HIGH: 2.5,
@@ -242,6 +283,8 @@ const DEBUG = URL_PARAMS.get('debug') === '1';
 const WEATHER_FORCE = (URL_PARAMS.get('weather') || '').toLowerCase().trim();
 const FX_FORCE = (URL_PARAMS.get('fx') || '').toLowerCase().trim();
 const TOD_FORCE = (URL_PARAMS.get('tod') || '').toLowerCase().trim();
+const ADS_FORCE = (URL_PARAMS.get('ads') || '').toLowerCase().trim();
+const FAKE_AD = URL_PARAMS.get('fakead') === '1';
 
 /* ============================================================
    天氣與環境物理
@@ -1288,6 +1331,9 @@ function randInt(a, b) { return Math.floor(randRange(a, b + 1)); }
 let st, chick, plats, score, best, tOver, camX, camLook;
 let charging, charge, chargedFull, grounded, onPlatId;
 let lastScoredId, nextPlatId, lastJump;
+let lastSafePlatId, lastSafePlatSnap;
+let continueUsed, adCompletedRuns, adsPaused, adsSoundMuted;
+let adContinueOffered, pendingShowAdFn, rewardGranted, lastPlacementInfo, fakeAdTimer;
 let pendingRestart, tick, lastGroundTick, lastPressTick;
 let bufferedJump, bufferedCharge, squashT;
 let trauma, shakePhase, shakeX, shakeY;
@@ -1358,7 +1404,14 @@ function reset() {
   chargedFull = false;
   grounded = true;
   onPlatId = 1;
+  lastSafePlatId = 1;
+  lastSafePlatSnap = { id: 1, x: 0, y: CFG.START_Y, w: startPlatformWidth(), kind: 'start' };
   lastScoredId = 1;
+  continueUsed = false;
+  adContinueOffered = false;
+  pendingShowAdFn = null;
+  rewardGranted = false;
+  hideContinueBtn();
   lastJump = { vy: 0, charge: 0, peak: 0, airborne: false, startY: 0 };
   pendingRestart = false;
   tick = 0;
@@ -1576,6 +1629,7 @@ function ensurePlats() {
 }
 
 function startPress() {
+  if (adsPaused) return;
   if (st === 'over') {
     if (tOver > 0.28) pendingRestart = true;
     return;
@@ -1604,8 +1658,7 @@ function startPress() {
 function endPress() {
   if (pendingRestart) {
     pendingRestart = false;
-    reset();
-    startCountdown();
+    restartAfterGame();
     return;
   }
   if (st === 'countdown') {
@@ -1721,6 +1774,8 @@ function landOn(p) {
     haptic('score');
   }
   onPlatId = p.id;
+  lastSafePlatId = p.id;
+  lastSafePlatSnap = { id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || '' };
   if (isHeld() && !charging) {
     charging = true;
     charge = 0;
@@ -1750,6 +1805,7 @@ function die() {
     best = score;
     localStorage.setItem(BEST_KEY, String(best));
   }
+  offerRewardContinue();
 }
 
 function step(dt) {
@@ -1757,6 +1813,7 @@ function step(dt) {
   try { stepBody(dt); } finally { inStep = false; }
 }
 function stepBody(dt) {
+  if (adsPaused) return;
   if (st === 'over') { tOver += dt; return; }
   if (st === 'countdown') {
     countT += dt;
@@ -2559,7 +2616,7 @@ function draw() {
     ctx.fillStyle = 'rgba(20,30,40,.45)';
     ctx.fillRect(0, 0, W, H);
     const hintLines = wrapLines(hintEl.textContent || '', cardW - 40);
-    const cardH = 168 + hintLines.length * 16 + 8;
+    const cardH = 168 + hintLines.length * 16 + 8 + ((adContinueOffered && !continueUsed) ? 22 : 0);
     const cardY = Math.max(pad.t + 24, Math.min(H * 0.38, H - cardH - 24 - pad.b));
     ctx.fillStyle = 'rgba(255,255,255,.94)';
     roundRect(cardX, cardY, cardW, cardH, 18);
@@ -2572,10 +2629,15 @@ function draw() {
     ctx.fillText('本局 ' + score + '　今日最佳 ' + best, W / 2, cardY + 88);
     ctx.font = '15px sans-serif';
     ctx.fillText('再點一下重來', W / 2, cardY + 124);
+    let hintY = 150;
+    if (adContinueOffered && !continueUsed) {
+      ctx.fillText('或點下方按鈕看廣告接續', W / 2, cardY + 146);
+      hintY = 170;
+    }
     ctx.font = '11px sans-serif';
     ctx.fillStyle = '#6a7a85';
     for (let i = 0; i < hintLines.length; i++) {
-      ctx.fillText(hintLines[i], W / 2, cardY + 150 + i * 16);
+      ctx.fillText(hintLines[i], W / 2, cardY + hintY + i * 16);
     }
   }
   if (DEBUG) {
@@ -2625,7 +2687,7 @@ function loop(ts) {
 let pointerId = null;
 let keyHeld = false;
 function onPointerDown(ev) {
-  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn, #placeBar, #locBtn')) return;
+  if (ev.target && ev.target.closest && ev.target.closest('#vibBtn, #placeBar, #locBtn, #adContinueBtn, #adFake')) return;
   ev.preventDefault();
   if (pointerId !== null) return;
   pointerId = ev.pointerId;
@@ -2642,8 +2704,9 @@ window.addEventListener('pointerup', onPointerUp, { passive: false });
 window.addEventListener('pointercancel', onPointerUp, { passive: false });
 window.addEventListener('keydown', ev => {
   if (ev.code !== 'Space' && ev.code !== 'ArrowUp') return;
+  if (ev.target && ev.target.closest && ev.target.closest('#adContinueBtn, #adFake, button, input')) return;
   ev.preventDefault();
-  if (ev.repeat || keyHeld) return;
+  if (ev.repeat || keyHeld || adsPaused) return;
   keyHeld = true;
   startPress();
 });
@@ -2987,8 +3050,355 @@ window.__BAIJI__ = {
   die,
   setVibrate,
   requestPlace,
-  placeLine
+  placeLine,
+  restartAfterGame,
+  continueAfterReward,
+  clickContinueAd,
+  adsState() {
+    return {
+      wanted: adsWanted(),
+      fake: FAKE_AD,
+      enabled: !!(CFG && CFG.ADS_ENABLED),
+      testMode: !!(CFG && CFG.ADS_TEST_MODE),
+      client: (CFG && CFG.ADS_CLIENT) || '',
+      paused: !!adsPaused,
+      continueUsed: !!continueUsed,
+      offered: !!adContinueOffered,
+      completedRuns: adCompletedRuns || 0,
+      every: CFG.ADS_INTERSTITIAL_EVERY,
+      lastSafePlatId: lastSafePlatId,
+      lastPlacement: lastPlacementInfo || null,
+      soundMuted: !!adsSoundMuted
+    };
+  }
 };
+
+function adsWanted() {
+  if (ADS_FORCE === '0' || ADS_FORCE === 'off' || ADS_FORCE === 'false') return false;
+  if (FAKE_AD || ADS_FORCE === '1' || ADS_FORCE === 'on') return true;
+  return !!(CFG && CFG.ADS_ENABLED);
+}
+function adsUseGoogle() {
+  return adsWanted() && !FAKE_AD;
+}
+function hideContinueBtn() {
+  adContinueOffered = false;
+  const btn = document.getElementById('adContinueBtn');
+  if (btn) btn.classList.remove('visible');
+}
+function showContinueBtn() {
+  adContinueOffered = true;
+  const btn = document.getElementById('adContinueBtn');
+  if (btn) btn.classList.add('visible');
+}
+function pauseForAd() {
+  adsPaused = true;
+  adsSoundMuted = true;
+  charging = false;
+  pendingRestart = false;
+  if (typeof window.adConfig === 'function' && adsUseGoogle()) {
+    try { window.adConfig({ sound: 'off' }); } catch (e) {}
+  }
+}
+function resumeAfterAd() {
+  adsPaused = false;
+  adsSoundMuted = false;
+  hideFakeAd();
+  if (typeof window.adConfig === 'function' && adsUseGoogle()) {
+    try { window.adConfig({ sound: 'off' }); } catch (e) {} // 目前尚無遊戲音效
+  }
+}
+function hideFakeAd() {
+  if (fakeAdTimer) { clearTimeout(fakeAdTimer); fakeAdTimer = 0; }
+  const el = document.getElementById('adFake');
+  if (el) el.classList.remove('visible');
+}
+function showFakeAd(kind, note) {
+  const el = document.getElementById('adFake');
+  const title = document.getElementById('adFakeTitle');
+  const noteEl = document.getElementById('adFakeNote');
+  const view = document.getElementById('adFakeView');
+  const skip = document.getElementById('adFakeSkip');
+  const close = document.getElementById('adFakeClose');
+  if (title) title.textContent = kind === 'reward' ? '測試廣告（接續本局）' : '測試廣告（兩局之間）';
+  if (noteEl) noteEl.textContent = note || '這是本機模擬，沒有向 Google 發送請求。';
+  if (view) view.hidden = kind !== 'reward';
+  if (skip) skip.hidden = kind !== 'reward';
+  if (close) close.hidden = kind === 'reward';
+  if (el) el.classList.add('visible');
+}
+function placementInfo(opts, status) {
+  return {
+    breakType: opts.type,
+    breakName: opts.name || '',
+    breakFormat: opts.type === 'reward' ? 'reward' : 'interstitial',
+    breakStatus: status
+  };
+}
+function finishAdBreak(opts, status) {
+  const info = placementInfo(opts, status);
+  lastPlacementInfo = info;
+  try {
+    if (typeof opts.adBreakDone === 'function') opts.adBreakDone(info);
+  } catch (e) {
+    console.warn('[ads]', e);
+  }
+}
+function runFakeAd(opts) {
+  if (opts.type === 'reward') {
+    if (typeof opts.beforeReward !== 'function') {
+      finishAdBreak(opts, 'other');
+      return;
+    }
+    opts.beforeReward(function showAdFn() {
+      pauseForAd();
+      if (typeof opts.beforeAd === 'function') opts.beforeAd();
+      showFakeAd('reward');
+      const view = document.getElementById('adFakeView');
+      const skip = document.getElementById('adFakeSkip');
+      function done(viewed) {
+        hideFakeAd();
+        if (viewed) {
+          if (typeof opts.adViewed === 'function') opts.adViewed();
+        } else if (typeof opts.adDismissed === 'function') {
+          opts.adDismissed();
+        }
+        if (typeof opts.afterAd === 'function') opts.afterAd();
+        finishAdBreak(opts, viewed ? 'viewed' : 'dismissed');
+      }
+      if (view) view.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); done(true); };
+      if (skip) skip.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); done(false); };
+    });
+    return;
+  }
+  // interstitial / next
+  pauseForAd();
+  if (typeof opts.beforeAd === 'function') opts.beforeAd();
+  showFakeAd('next');
+  const minMs = Math.max(400, CFG.ADS_FAKE_MS || 1400);
+  const opened = Date.now();
+  function closeNext() {
+    if (Date.now() - opened < minMs - 20) {
+      fakeAdTimer = setTimeout(closeNext, minMs - (Date.now() - opened));
+      return;
+    }
+    hideFakeAd();
+    if (typeof opts.afterAd === 'function') opts.afterAd();
+    finishAdBreak(opts, 'viewed');
+  }
+  const close = document.getElementById('adFakeClose');
+  if (close) close.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); closeNext(); };
+  fakeAdTimer = setTimeout(closeNext, minMs);
+}
+function safeAdBreak(opts) {
+  opts = opts || {};
+  if (!adsWanted()) {
+    finishAdBreak(opts, 'ignored');
+    return;
+  }
+  if (FAKE_AD) {
+    runFakeAd(opts);
+    return;
+  }
+  const fn = window.adBreak;
+  if (typeof fn !== 'function') {
+    finishAdBreak(opts, 'notReady');
+    return;
+  }
+  try {
+    fn({
+      type: opts.type,
+      name: opts.name,
+      beforeAd: opts.beforeAd,
+      afterAd: opts.afterAd,
+      beforeReward: opts.beforeReward,
+      adDismissed: opts.adDismissed,
+      adViewed: opts.adViewed,
+      adBreakDone: function (info) {
+        lastPlacementInfo = info || placementInfo(opts, 'other');
+        try {
+          if (typeof opts.adBreakDone === 'function') opts.adBreakDone(lastPlacementInfo);
+        } catch (e) {
+          console.warn('[ads]', e);
+        }
+      }
+    });
+  } catch (e) {
+    console.warn('[ads]', e);
+    finishAdBreak(opts, 'error');
+  }
+}
+function installAdsTag() {
+  if (window.__BAIJI_ADS_TAG__ || !adsUseGoogle()) return;
+  window.adsbygoogle = window.adsbygoogle || [];
+  // 官方樣板：https://developers.google.com/ad-placement/docs/html5-game-structure
+  window.adBreak = window.adConfig = function (o) { window.adsbygoogle.push(o); };
+  const s = document.createElement('script');
+  s.async = true;
+  const client = (CFG.ADS_CLIENT || '').trim();
+  s.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js' +
+    (client ? ('?client=' + encodeURIComponent(client)) : '');
+  if (client) s.setAttribute('data-ad-client', client);
+  // 尚無正式帳號，或 CFG.ADS_TEST_MODE 時一律走測試模式，不請求正式廣告
+  if (CFG.ADS_TEST_MODE || !client) s.setAttribute('data-adbreak-test', 'on');
+  s.crossOrigin = 'anonymous';
+  document.head.appendChild(s);
+  window.__BAIJI_ADS_TAG__ = true;
+  try {
+    window.adConfig({
+      preloadAdBreaks: 'on',
+      sound: 'off',
+      onReady: function () {}
+    });
+  } catch (e) {}
+}
+function offerRewardContinue() {
+  hideContinueBtn();
+  pendingShowAdFn = null;
+  rewardGranted = false;
+  if (continueUsed || !adsWanted()) return;
+  safeAdBreak({
+    type: 'reward',
+    name: 'continue-run',
+    beforeReward: function (showAdFn) {
+      pendingShowAdFn = showAdFn;
+      showContinueBtn();
+    },
+    beforeAd: pauseForAd,
+    afterAd: resumeAfterAd,
+    adDismissed: function () {
+      rewardGranted = false;
+      hideContinueBtn();
+    },
+    adViewed: function () {
+      rewardGranted = true;
+    },
+    adBreakDone: function (info) {
+      lastPlacementInfo = info;
+      resumeAfterAd();
+      pendingShowAdFn = null;
+      if (rewardGranted && !continueUsed) {
+        rewardGranted = false;
+        hideContinueBtn();
+        continueAfterReward();
+        return;
+      }
+      hideContinueBtn();
+    }
+  });
+}
+function clickContinueAd() {
+  if (!pendingShowAdFn || continueUsed || adsPaused) return false;
+  const fn = pendingShowAdFn;
+  pendingShowAdFn = null;
+  hideContinueBtn();
+  fn();
+  return true;
+}
+function safePlatForContinue() {
+  const id = lastSafePlatId || onPlatId || 1;
+  let plat = plats.find(function (p) { return p.id === id; });
+  if (!plat && lastSafePlatSnap) {
+    plat = {
+      id: lastSafePlatSnap.id,
+      x: lastSafePlatSnap.x,
+      y: lastSafePlatSnap.y,
+      w: lastSafePlatSnap.w,
+      kind: lastSafePlatSnap.kind || ''
+    };
+    plats.push(plat);
+    plats.sort(function (a, b) { return a.id - b.id; });
+    if (nextPlatId <= plat.id) nextPlatId = plat.id + 1;
+  }
+  return plat || plats[0];
+}
+function continueAfterReward() {
+  const plat = safePlatForContinue();
+  if (!plat) {
+    reset();
+    startCountdown();
+    return;
+  }
+  continueUsed = true;
+  adContinueOffered = false;
+  hideContinueBtn();
+  const inset = Math.min(Math.max(40, plat.w * 0.22), Math.max(16, plat.w - 24));
+  chick.x = plat.x + inset;
+  chick.y = plat.y - CFG.CHICKEN_R;
+  chick.vy = 0;
+  chick.vx = CFG.RUN_SPEED;
+  grounded = true;
+  onPlatId = plat.id;
+  lastSafePlatId = plat.id;
+  charging = false;
+  charge = 0;
+  chargedFull = false;
+  bufferedJump = false;
+  tOver = 0;
+  pendingRestart = false;
+  trauma = 0;
+  squashT = 0;
+  stretchT = 0;
+  ignoreHoldUntilRelease = isHeld();
+  updateCam();
+  ensurePlats();
+  if (typeof syncSceneChrome === 'function') syncSceneChrome();
+  startCountdown();
+}
+function restartAfterGame() {
+  hideContinueBtn();
+  pendingShowAdFn = null;
+  adCompletedRuns = (adCompletedRuns || 0) + 1;
+  const every = Math.max(1, CFG.ADS_INTERSTITIAL_EVERY || 3);
+  const due = adsWanted() && (adCompletedRuns % every === 0);
+  function go() {
+    resumeAfterAd();
+    reset();
+    startCountdown();
+  }
+  if (!due) {
+    go();
+    return;
+  }
+  let started = false;
+  function goOnce() {
+    if (started) return;
+    started = true;
+    go();
+  }
+  safeAdBreak({
+    type: 'next',
+    name: 'next-run',
+    beforeAd: pauseForAd,
+    afterAd: resumeAfterAd,
+    adBreakDone: function (info) {
+      lastPlacementInfo = info;
+      goOnce();
+    }
+  });
+}
+function initAds() {
+  adCompletedRuns = adCompletedRuns || 0;
+  adsPaused = false;
+  adsSoundMuted = false;
+  continueUsed = !!continueUsed;
+  hideContinueBtn();
+  hideFakeAd();
+  const btn = document.getElementById('adContinueBtn');
+  if (btn) {
+    btn.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      clickContinueAd();
+    });
+  }
+  ['adFakeView', 'adFakeSkip', 'adFakeClose'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+  });
+  if (adsUseGoogle()) installAdsTag();
+}
 
 function onViewportChange() {
   layout();
@@ -3005,6 +3415,7 @@ layout();
 initWeather(SEED0);
 reset();
 syncSceneChrome();
+initAds();
 requestAnimationFrame(loop);
 </script>
 </body>

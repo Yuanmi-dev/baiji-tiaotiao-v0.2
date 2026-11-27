@@ -1,38 +1,59 @@
-# 白雞跳跳 v0.2 試玩雛形
+# 白雞跳跳 v0.2
 
-這是方向一第一款遊戲「白雞跳跳」的可試玩雛形。公開試玩：https://yuanmi-dev.github.io/baiji-tiaotiao-v0.2/v0.1 仍保留在上一層的 `index.html`，本目錄不會覆蓋它。
+短局蓄力跳躍的可試玩雛形。公開示範：https://yuanmi-dev.github.io/baiji-tiaotiao-v0.2/
+
+儲存庫：https://github.com/Yuanmi-dev/baiji-tiaotiao-v0.2  
+這是 GitHub Pages 示範站，不是正式官網，也不會部署到 yuanmi.tw。v0.1 在上一層目錄的 `index.html`，請不要覆蓋它。
+
+## 架構
+
+單一檔 `index.html`：vanilla JS + Canvas 2D。玩法、每日種子、天氣物理、畫面與廣告呼叫點都在同一個文件裡（Ad Placement API 規定廣告標籤與遊戲畫布要在同一份文件）。
+
+- 邏輯解析度 390×844，實際畫面依高度縮放並橫向延伸。
+- 物理以固定 60 tick 模擬；關卡由台北時間（Asia/Taipei）日期種子決定，同一天同一關。
+- 廣告採 Google Ad Placement API（AdSense H5 遊戲廣告）預埋 `adBreak` / `adConfig`。尚無 AdSense 帳號時不要填 publisher id；預設 `CFG.ADS_ENABLED` 為關閉，開啟時走 `data-adbreak-test="on"` 測試模式。沒有廣告、被擋或回呼失敗時，遊戲會照常進行。
 
 ## 怎麼玩
 
-- 按住開始蓄力，放開起跳。按越久跳得越遠、越高，有上限。
-- 輕點是最小跳躍。蓄力時白雞會蹲下，並顯示蓄力條。
-- 角色會自動向前跑。蓄力時仍會跑；若跑到平台邊緣還按著，會以當前力道自動起跳。
-- 短跳過近的缺口，長跳過遠的缺口或較高的平台。蓄滿時若對面是窄台，可能會跳過頭。
-- 觸控與滑鼠都可用，空白鍵／上鍵也可。
-- 畫面右上角可開關震動。支援 `navigator.vibrate` 的裝置（多數 Android）會在蓄滿、起跳、得分、撞到時輕震；無法調整震動強弱。iPhone 不支援這個 API，會改以畫面抖動回饋。
+按住蓄力、放開起跳。角色自動向前跑，跑到台邊仍按著會以當前力道自動起跳。觸控、滑鼠、空白鍵／上鍵都可用。右上角可關震動。
 
-## 為什麼從「穿管子」改成平台跳躍
+死掉後可再點重來；若測試廣告流程有開，也可「看廣告接續目前分數」（每局限一次，從最近安全平台重生並重跑倒數）。
 
-v0.1 是持續下落、連點拍翅去穿管子。蓄力必須在落地後按住再放開，空中長按只會一直掉下去，長短蓄力也對不到「要過哪一個缺口」。改成自動向前的平台關後，短按過近台、長按過遠台或高跳，蓄力才有意義。
+## CFG 重要參數
 
-## 每日關卡
+都寫在 `index.html` 開頭的 `CFG` 物件：
 
-關卡用台北時間（Asia/Taipei）的日期當種子，同一天會是同一張圖。今日最佳存在瀏覽器 localStorage，換日後重新計算。
+| 參數 | 說明 |
+| --- | --- |
+| `GRAVITY`、`JUMP_VY_MIN`／`MAX`、`FALL_GRAVITY_MUL` | 重力與起跳；目前不要隨便改滯空手感 |
+| `CHARGE_MS`、`RUN_SPEED` | 蓄滿時間、跑速 |
+| `RAMP_PLATFORMS`、`REACTION_S`、`MIN_PLATFORM_LEN_FOR_CHARGE` | 前段暖身：前 6 台要夠長，才能反應並蓄滿 |
+| `COUNTDOWN_S` | 開始與重開前的倒數 |
+| `ADS_ENABLED` | 是否啟用廣告呼叫。正式投放前請保持 `false` |
+| `ADS_TEST_MODE` | `true` 時加上 `data-adbreak-test="on"`，只顯示測試廣告 |
+| `ADS_CLIENT` | 日後填入 `ca-pub-…`。現在請留空 |
+| `ADS_INTERSTITIAL_EVERY` | 每完成 N 局，下一次倒數前插一次 interstitial（預設 3） |
 
-## 調手感
+## URL 參數
 
-難度與物理參數都寫在 `index.html` 開頭的 `CFG` 物件，包括重力、最小／最大起跳速度、蓄滿時間、跑速，以及短／中／長缺口與平台寬度。前 6 個平台為暖身（`RAMP_PLATFORMS`、`REACTION_S`、`MIN_PLATFORM_LEN_FOR_CHARGE` 等），長度會依天氣的跑速、風與摩擦加長，讓玩家有反應時間並能蓄滿；第 7 台起回到既有難度。
+可組合使用，例如 `?weather=ice&debug=1&fakead=1`。
 
-## 驗證
+| 參數 | 說明 |
+| --- | --- |
+| `weather` | 強制天氣，如 `moon`、`ice`、`tailwind`、`storm` |
+| `tod` | 強制時段視覺（`dawn`／`morning`／`noon`／`golden`／`sunset`／`dusk`／`night`），不改物理 |
+| `fx` | 畫面品質：`high`／`medium`／`low`，不改物理 |
+| `debug` | `1` 時顯示調參資訊（種子、蓄力、跳高、缺口） |
+| `fakead` | `1` 時用本機模擬廣告流程，不向 Google 發請求；建議搭配 `debug=1` |
+| `ads` | `1` 強制開啟廣告呼叫（仍受測試模式與空的 client 限制）；`0` 強制關閉 |
 
-headless 驗證步驟與結果見 `run-log.md`。
+## 部署
 
-## 手感與除錯（v0.2 後續補強）
+1. 先 `git pull --rebase`，再改檔，一般 `git push`，不要 force push。
+2. 把 `index.html`（以及 README、run-log）提交到本儲存庫的 `main`。GitHub Pages 由此分支發布。
+3. 不要部署到 yuanmi.tw 或其他正式網域，除非另行決定。
+4. 本機預覽可用 `python3 -m http.server 8000`，瀏覽器打開 `http://localhost:8000/`。測試廣告流程請用 `http://localhost:8000/?debug=1&fakead=1`。
 
-參考 [awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills) 的做法，但沒有安裝或執行該倉庫的指令：
+要換成正式 AdSense 時：申請並通過 AdSense／H5 遊戲廣告、取得 `ca-pub-` 編號，填入 `CFG.ADS_CLIENT`，將 `ADS_ENABLED` 設為 `true`，並在確定可投放後把 `ADS_TEST_MODE` 改為 `false`（同時不要再輸出 `data-adbreak-test="on"`）。網域要加到 AdSense 網站，且廣告標籤必須與遊戲在同一份文件（若用 iframe 包住遊戲，標籤要放在 iframe 內，並加上 `allow="autoplay"`）。
 
-- 物理用固定 60 tick 模擬；下落重力較大、有下落速度上限。
-- 走下平台後約 0.10 秒內仍可起跳（土狼時間）；落地前約 0.12 秒的按壓會在落地後補跳（跳躍緩衝）。
-- 不支援震動時，畫面抖動改為衰減的正弦波，避免每幀亂數造成雜訊感。落地會有短暫擠壓。右上角開關同時控制震動與畫面抖動。
-- 鏡頭會略為看向跑向，方便預判下一個缺口。
-- 在網址加上 `?debug=1` 可顯示蓄力、跳高、缺口等調參資訊。
+驗證紀錄見 `run-log.md`。

@@ -142,3 +142,27 @@ headless 人類檢查（36 種子 × 11 天氣 × 蓄力誤差 −80／−40／0
 - 放開延遲：framesToMove 皆為 0；短按 80 ms 中位數 0.55 ms（最大 1.0 ms）；蓄力 0／1 中位數 0.5 ms（最大 0.6 ms）
 
 v0.1 未改。
+
+## 廣告呼叫點預埋（2026-11-27）
+
+依 Google Ad Placement API（AdSense H5 遊戲廣告）在同一份 `index.html` 預埋 `adsbygoogle` 樣板與 `adBreak`／`adConfig` 包裝。沒有放入真實 publisher id。`CFG.ADS_ENABLED` 預設關閉；若啟用且尚未填 client，或 `ADS_TEST_MODE` 為 true，會加上 `data-adbreak-test="on"`。無廣告、被擋或 `placementInfo.breakStatus` 為 ignored／noAdPreloaded／error 時，遊戲照常可重來。
+
+兩個位置：
+
+- 死掉後可看廣告接續目前分數（`type: 'reward'`，`beforeReward`／`adViewed`／`adDismissed`）。每局限一次；看完後從最近安全平台重生並重跑倒數。未看完不給獎勵。
+- 兩局之間 interstitial（`type: 'next'`），預設每 3 局、在倒數開始前呼叫（`ADS_INTERSTITIAL_EVERY`）。
+- 廣告期間 `beforeAd`／`afterAd` 會暫停物理與音效旗標（目前尚無遊戲音效，已預留）。
+- 本機可用 `?debug=1&fakead=1` 模擬完整流程。
+
+倒數、蓄力、放開即跳、全螢幕、天氣、每日種子、前段暖身皆未改。物理仍為 GRAVITY 2200、JUMP_VY 640／1200、FALL_GRAVITY_MUL 1.8。
+
+headless：
+
+- 預設關閉廣告：死亡後無接續按鈕，重來會進入倒數。
+- `?fakead=1`：死亡後出現接續按鈕；看完後重跑倒數、停在最近安全平台，`placementInfo.breakStatus` 為 viewed；略過則留在結算畫面且不給獎勵（dismissed）；同一局第二次死亡不再提供。
+- interstitial 預設每 3 局出現一次，關閉後進入倒數。
+- `checkWith` 36 種子 × 11 天氣仍為 396/396。人類模擬（1980 局）第 3、4 台離開通過率仍為 100%，前 10 台整段 55.7%。
+- 滯空未變：晴朗 0.95 秒（峰 312.5）、月球 2.33 秒（峰 323.2）、火星 1.55 秒、暴風雨 0.92 秒。
+- 放開延遲：framesToMove 皆為 0；短按 80 ms 中位數 0.5 ms（最大 0.9 ms）；蓄力 0 中位數 0.5 ms；蓄力 1 中位數 0.6 ms（最大 0.9 ms）。
+
+v0.1 未改。
