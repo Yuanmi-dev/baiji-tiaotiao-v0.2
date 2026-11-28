@@ -1852,9 +1852,10 @@ function spawnDustBurst(kind) {
   const pal = weather ? weather.palette : 'earth';
   const land = kind === 'land';
   // 月球落地揚塵較明顯；真空沿拋物線落下，不隨風飄
-  const n = pal === 'moon' ? (land ? 12 : 8) : pal === 'mars' ? (land ? 8 : 6) : (land ? 0 : CFG.JUMP_DUST);
+  const n = pal === 'moon' ? (land ? 12 : 8) : pal === 'mars' ? (land ? 8 : 6) : (land ? (fxQuality === 'low' ? 6 : 10) : CFG.JUMP_DUST);
   if (!n) return;
-  if (dust.length + n > 28) dust.splice(0, dust.length + n - 28);
+  const cap = fxQuality === 'low' ? 22 : 36;
+  if (dust.length + n > cap) dust.splice(0, dust.length + n - cap);
   const feetY = chick.y + CFG.CHICKEN_R;
   const gMul = weather && weather.gMul != null ? weather.gMul : 1;
   const gDust = pal === 'moon' || pal === 'mars' ? CFG.GRAVITY * gMul : 900;
@@ -1874,6 +1875,38 @@ function spawnDustBurst(kind) {
 }
 function spawnJumpDust() { spawnDustBurst('jump'); }
 function spawnLandDust() { spawnDustBurst('land'); }
+function spawnPerfectBurst() {
+  const n = fxQuality === 'low' ? 6 : 14;
+  const cap = fxQuality === 'low' ? 22 : 40;
+  if (dust.length + n > cap) dust.splice(0, dust.length + n - cap);
+  const feetY = chick.y + CFG.CHICKEN_R;
+  for (let i = 0; i < n; i++) {
+    const ang = (i / n) * Math.PI * 2;
+    const spd = 70 + (i % 3) * 28;
+    dust.push({
+      kind: 'spark',
+      x: chick.x,
+      y: feetY - 4,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd * 0.7 - 40,
+      life: 0.32 + (i % 4) * 0.04,
+      t: 0,
+      g: 420,
+      r: 1.6 + (i % 3) * 0.4,
+      color: i % 2 ? '#ffe08a' : '#fff6d0'
+    });
+  }
+  dust.push({
+    kind: 'ring',
+    x: chick.x,
+    y: feetY - 2,
+    vx: 0, vy: 0,
+    life: 0.34,
+    t: 0,
+    g: 0,
+    r: 8
+  });
+}
 function updateFx(dt) {
   if (stretchT > 0) stretchT = Math.max(0, stretchT - dt);
   if (st === 'play' && wxBannerT > 0) wxBannerT = Math.max(0, wxBannerT - dt);
@@ -1953,7 +1986,10 @@ function landOn(p) {
   lastSafePlatSnap = { id: p.id, x: p.x, y: p.y, w: p.w, kind: p.kind || '' };
   if (didLand && justScored) {
     const mid = p.x + p.w * 0.5;
-    if (Math.abs(chick.x - mid) <= p.w * 0.22) playSfx('perfect');
+    if (Math.abs(chick.x - mid) <= p.w * 0.22) {
+      playSfx('perfect');
+      spawnPerfectBurst();
+    }
   }
   if (isHeld() && !charging) {
     charging = true;
@@ -2084,7 +2120,7 @@ function stepBody(dt) {
 
   if (chick.y - CFG.CHICKEN_R > CFG.DEATH_Y || chick.y > CFG.DEATH_Y) die();
 
-  const lookTarget = CFG.CAM_LOOK;
+  const lookTarget = CFG.CAM_LOOK + ((!grounded && st === 'play') ? 22 : 0);
   const followT = 1 - Math.exp(-CFG.CAM_FOLLOW * dt);
   camLook += (lookTarget - camLook) * followT;
   updateCam();
@@ -2129,14 +2165,82 @@ function drawDust() {
   const col = dustColor();
   for (let i = 0; i < dust.length; i++) {
     const d = dust[i];
-    const u = 1 - d.t / d.life;
-    ctx.globalAlpha = 0.6 * u;
+    const u = Math.max(0, 1 - d.t / d.life);
+    if (d.kind === 'ring') {
+      ctx.save();
+      ctx.globalAlpha = 0.7 * u;
+      ctx.strokeStyle = '#ffe08a';
+      ctx.lineWidth = 2.2 * u + 0.6;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, (d.r || 8) + 22 * (1 - u), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    if (d.kind === 'spark') {
+      ctx.save();
+      ctx.globalAlpha = 0.95 * u;
+      ctx.fillStyle = d.color || '#ffe08a';
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, (d.r || 1.8) * (0.7 + u * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      continue;
+    }
+    ctx.globalAlpha = 0.55 * u;
     ctx.fillStyle = col;
     ctx.beginPath();
-    ctx.arc(d.x, d.y, (d.r || 2.4) + 2.0 * u, 0, Math.PI * 2);
+    ctx.ellipse(d.x, d.y, (d.r || 2.4) + 2.4 * u, (d.r || 2.4) * 0.7 + 1.4 * u, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   }
+}
+function drawChickenShadow() {
+  const r = CFG.CHICKEN_R;
+  let groundY = null;
+  if (grounded) {
+    groundY = chick.y + r;
+  } else {
+    let best = 1e9;
+    for (let i = 0; i < plats.length; i++) {
+      const p = plats[i];
+      if (chick.x + 10 >= p.x && chick.x - 10 <= p.x + p.w && p.y >= chick.y) {
+        const gap = p.y - chick.y;
+        if (gap < best) { best = gap; groundY = p.y; }
+      }
+    }
+  }
+  if (groundY == null) return;
+  const gap = Math.max(0, groundY - (chick.y + r));
+  const sa = grounded ? 0.26 : Math.max(0.06, 0.24 - gap / 320);
+  const rx = grounded ? 15.5 : 13 + Math.min(16, gap * 0.05);
+  const ry = grounded ? 5.2 : 4 + Math.min(5, gap * 0.015);
+  ctx.save();
+  ctx.fillStyle = 'rgba(30,24,16,' + sa + ')';
+  ctx.beginPath();
+  ctx.ellipse(chick.x, groundY + 3.2, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  if (grounded && fxQuality !== 'low') {
+    ctx.fillStyle = 'rgba(20,14,10,0.18)';
+    ctx.beginPath();
+    ctx.ellipse(chick.x, groundY + 3.2, 8, 2.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function drawChargeGlow() {
+  if (st !== 'play' || !charging || charge <= 0) return;
+  const rad = 16 + 28 * charge;
+  const a = 0.16 + 0.32 * charge;
+  const rgb = charge >= 1 ? '255,168,70' : '120,198,140';
+  const g = ctx.createRadialGradient(chick.x, chick.y + 2, 3, chick.x, chick.y + 2, rad);
+  g.addColorStop(0, 'rgba(' + rgb + ',' + a + ')');
+  g.addColorStop(0.55, 'rgba(' + rgb + ',' + (a * 0.35) + ')');
+  g.addColorStop(1, 'rgba(' + rgb + ',0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(chick.x, chick.y + 2, rad, 0, Math.PI * 2);
+  ctx.fill();
 }
 // The same silhouette appears on the course and on the daily ticket.
 function paintBird(wingLift = 0) {
@@ -2166,9 +2270,9 @@ function paintBird(wingLift = 0) {
 }
 function drawChicken() {
   const r = CFG.CHICKEN_R;
-  const landSq = squashT > 0 ? 0.22 * (squashT / CFG.LAND_SQUASH) : 0;
-  const chargeSq = charging ? 0.28 * charge : 0;
-  const stretch = stretchT > 0 ? CFG.JUMP_STRETCH * (stretchT / CFG.JUMP_STRETCH_S) : 0;
+  const landSq = squashT > 0 ? 0.34 * (squashT / CFG.LAND_SQUASH) : 0;
+  const chargeSq = charging ? 0.32 * charge : 0;
+  const stretch = stretchT > 0 ? (CFG.JUMP_STRETCH + 0.08) * (stretchT / CFG.JUMP_STRETCH_S) : 0;
   const squat = stretch > 0 ? 0 : Math.max(chargeSq, landSq);
   const running = grounded && st === 'play';
   // Anchor the stride to distance so the cadence follows the actual run speed.
@@ -2768,11 +2872,21 @@ function draw() {
 
   drawTrail();
   drawDust();
+  drawChickenShadow();
+  drawChargeGlow();
   drawChicken();
   drawChargeBar();
   ctx.restore();
 
   drawWx(W, H);
+  if (fxQuality !== 'low') {
+    const vg = ctx.createRadialGradient(W * 0.5, H * 0.42, Math.min(W, H) * 0.36, W * 0.5, H * 0.5, Math.max(W, H) * 0.72);
+    vg.addColorStop(0, 'rgba(16,24,32,0)');
+    vg.addColorStop(0.7, 'rgba(16,24,32,0.03)');
+    vg.addColorStop(1, isDarkSky() ? 'rgba(6,10,16,0.34)' : 'rgba(20,36,28,0.16)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   // HUD：避開安全區；天氣用大徽章，日期依裝置時區／位置
   const hudInk = isDarkSky() ? 'rgba(240,244,250,.9)' : 'rgba(20,40,50,.82)';

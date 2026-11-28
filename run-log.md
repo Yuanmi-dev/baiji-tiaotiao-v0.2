@@ -176,3 +176,7 @@ v0.1 未改。
 Fal 模型：背景 `fal-ai/nano-banana-2`（3 張，各 USD 0.08）；音效 `elevenlabs/sound-effects/v3`（約 5.7 秒，USD 0.004／秒）；配樂 `elevenlabs/music/v2.5`（20 秒，USD 0.6／分鐘）。本遊戲估計花費約 **USD 0.46**，低於每款約 5 美元的上限。
 
 v0.1 未改。
+
+## 畫面精緻化（2026-11-28 12:21 台北時間）
+
+只改繪製與鏡頭手感，不改物理、難度或廣告。新增平台接觸影、蓄力光暈、落地揚塵（地球天氣也會出現）、完美落點爆發、更明顯的擠壓伸展、滯空時鏡頭略為前視，以及暗角。`checkCourse` 仍通過。實跑約 60 fps。未使用 fal，花費 0 美元。v0.1 未改。對照圖見 `screenshots/after-polish/compare-phone-clear.png`。
